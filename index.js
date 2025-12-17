@@ -7,34 +7,24 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const jwt = require("jsonwebtoken");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-
+const admin = require("firebase-admin");
+const stripe = require("stripe");
 dotenv.config();
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// ============================================
-// MIDDLEWARE
-// ============================================
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "http://localhost:3000"],
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const admin = require("firebase-admin");
+const serviceAccountKey = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+const serviceAccount = require(serviceAccountKey);
 
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+admin.initializeApp({
+  
+  credential: admin.credential.cert(serviceAccount),
+  
+},
+console.log("✅ Firebase Admin Initialized"),);
 
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path}`);
-  next();
-});
-
+// JWT VERIFICATION MIDDLEWARE
 // JWT Verification Middleware
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -59,6 +49,40 @@ const verifyToken = (req, res, next) => {
     next();
   });
 };
+
+// ============================================
+// STRIPE INIT (Now after dotenv.config())
+// ============================================
+let stripeClient;
+if (process.env.STRIPE_SECRET_KEY) {
+  stripeClient = stripe(process.env.STRIPE_SECRET_KEY);
+  console.log("Stripe initialized");
+} else {
+  console.warn("STRIPE_SECRET_KEY missing - Payments disabled");
+  stripeClient = { warning: true }; // Stub
+}
+// ============================================
+// MIDDLEWARE
+// ============================================
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "http://localhost:5174","http://localhost:3000"],
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path}`);
+  next();
+});
+
+
 
 // Role verification middleware
 const verifyRole = (...allowedRoles) => {
@@ -97,7 +121,7 @@ async function connectDB() {
     await client.db("admin").command({ ping: 1 });
     console.log("✅ MongoDB Connected Successfully");
 
-    db = client.db("ticketbari_db");
+    db = client.db("MavenusDB");
     usersCollection = db.collection("users");
     ticketsCollection = db.collection("ticketsCollection");
     bookingCollection = db.collection("bookingCollection");
@@ -112,92 +136,24 @@ async function connectDB() {
     await usersCollection.createIndex({ email: 1 }, { unique: true });
     await usersCollection.createIndex({ uid: 1 }, { unique: true });
 
-    console.log("📦 Database: ticketbari_db");
-    console.log("✅ Collections and indexes ready");
+    console.log("Database: MavenusDB");
+    console.log("Collections and indexes ready");
   } catch (error) {
-    console.error("❌ MongoDB Connection Error:", error);
+    console.error("MongoDB Connection Error:", error);
     process.exit(1);
   }
 }
 
 connectDB();
 
-// ============================================
-// AUTH ROUTES
-// ============================================
 
-// Generate JWT Token
-app.post("/api/auth/token", async (req, res) => {
-  try {
-    const { email, uid } = req.body;
-
-    if (!email || !uid) {
-      return res.status(400).json({
-        success: false,
-        message: "Email and UID are required",
-      });
-    }
-
-    // Find user in database
-    let user = await usersCollection.findOne({ email });
-
-    // If user doesn't exist, create new user
-    if (!user) {
-      const newUser = {
-        uid,
-        email,
-        name: req.body.name || "User",
-        photoURL: req.body.photoURL || null,
-        role: "user",
-        isFraud: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-
-      await usersCollection.insertOne(newUser);
-      user = newUser;
-    }
-
-    // Generate JWT token
-    const token = jwt.sign(
-      {
-        uid: user.uid,
-        email: user.email,
-        role: user.role,
-        userId: user._id.toString(),
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        _id: user._id,
-        uid: user.uid,
-        email: user.email,
-        name: user.name,
-        photoURL: user.photoURL,
-        role: user.role,
-        isFraud: user.isFraud,
-      },
-    });
-  } catch (error) {
-    console.error("Token generation error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
 
 // Get current user info
 app.get("/api/auth/me", verifyToken, async (req, res) => {
   try {
     const user = await usersCollection.findOne(
       { uid: req.user.uid },
-      { projection: { password: 0 } }
+      { projection: { createdAt: 0, updatedAt: 0 } } // Clean projection
     );
 
     if (!user) {
@@ -207,20 +163,17 @@ app.get("/api/auth/me", verifyToken, async (req, res) => {
       });
     }
 
-    res.json({
-      success: true,
-      data: user,
-    });
+    res.json({ success: true, data: user });
   } catch (error) {
+    console.error("Get user error:", error);
     res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
-
 // Update user profile
-app.put("/api/auth/profile", verifyToken, async (req, res) => {
+app.put("/api/auth/profile", async (req, res) => {
   try {
     const { name, photoURL } = req.body;
 
@@ -299,7 +252,7 @@ app.get("/api/tickets", async (req, res) => {
 });
 
 // GET single ticket
-app.get("/api/tickets/:id", async (req, res) => {
+app.get("/api/tickets/:id", verifyToken, async (req, res) => {
   try {
     const ticket = await ticketsCollection.findOne({
       _id: new ObjectId(req.params.id),
@@ -379,7 +332,7 @@ app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
 // POST create ticket (vendor only)
 app.post(
   "/api/tickets",
-  verifyToken,
+   verifyToken,
   verifyRole("vendor", "admin"),
   async (req, res) => {
     try {
@@ -424,7 +377,7 @@ app.post(
 // PUT update ticket
 app.put(
   "/api/tickets/:id",
-  verifyToken,
+   verifyToken,
   verifyRole("vendor", "admin"),
   async (req, res) => {
     try {
@@ -463,7 +416,7 @@ app.put(
 // DELETE ticket
 app.delete(
   "/api/tickets/:id",
-  verifyToken,
+   verifyToken,
   verifyRole("vendor", "admin"),
   async (req, res) => {
     try {
@@ -496,7 +449,7 @@ app.delete(
 // ============================================
 
 // POST create booking
-app.post("/api/bookings", verifyToken, async (req, res) => {
+app.post("/api/bookings", verifyToken,  async (req, res) => {
   try {
     const { ticketId, bookingQuantity } = req.body;
 
@@ -559,7 +512,7 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
 });
 
 // GET user's bookings
-app.get("/api/bookings/user/:userId", verifyToken, async (req, res) => {
+app.get("/api/bookings/user/:userId",  verifyToken,  async (req, res) => {
   try {
     const bookings = await bookingCollection
       .find({ userId: req.params.userId })
@@ -650,7 +603,7 @@ app.put(
 // ============================================
 
 // Create Stripe checkout session
-app.post("/api/payment/create-session", verifyToken, async (req, res) => {
+app.post("/api/payment/create-session", verifyToken ,  async (req, res) => {
   try {
     const { bookingId } = req.body;
 
@@ -797,7 +750,7 @@ app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
 // GET all tickets
 app.get(
   "/api/admin/tickets",
-  verifyToken,
+   verifyToken ,
   verifyRole("admin"),
   async (req, res) => {
     try {
@@ -819,7 +772,7 @@ app.get(
 // PUT approve/reject ticket
 app.put(
   "/api/admin/tickets/:id/status",
-  verifyToken,
+   verifyToken ,
   verifyRole("admin"),
   async (req, res) => {
     try {
@@ -860,7 +813,7 @@ app.put(
 // PUT toggle advertisement
 app.put(
   "/api/admin/tickets/:id/advertise",
-  verifyToken,
+   verifyToken ,
   verifyRole("admin"),
   async (req, res) => {
     try {
@@ -915,7 +868,7 @@ app.put(
 // GET all users
 app.get(
   "/api/admin/users",
-  verifyToken,
+   verifyToken ,
   verifyRole("admin"),
   async (req, res) => {
     try {
@@ -937,7 +890,7 @@ app.get(
 // PUT update user role
 app.put(
   "/api/admin/users/:id/role",
-  verifyToken,
+   verifyToken ,
   verifyRole("admin"),
   async (req, res) => {
     try {
@@ -973,7 +926,7 @@ app.put(
 // PUT mark vendor as fraud
 app.put(
   "/api/admin/users/:id/fraud",
-  verifyToken,
+   verifyToken , 
   verifyRole("admin"),
   async (req, res) => {
     try {
