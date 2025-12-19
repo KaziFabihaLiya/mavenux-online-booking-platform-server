@@ -7,7 +7,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const jwt = require("jsonwebtoken");
-const admin = require("firebase-admin");
+
 const stripe = require("stripe");
 dotenv.config();
 const app = express();
@@ -25,29 +25,19 @@ admin.initializeApp({
 console.log("✅ Firebase Admin Initialized"),);
 
 // JWT VERIFICATION MIDDLEWARE
-// JWT Verification Middleware
-const verifyToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader) {
-    return res.status(401).json({
-      success: false,
-      message: "No token provided",
-    });
-  }
-
-  const token = authHeader.split(" ")[1]; // Bearer TOKEN
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(403).json({
-        success: false,
-        message: "Invalid or expired token",
-      });
-    }
-    req.user = decoded;
+const verifyToken = async (req, res, next) => {
+  const token = req?.headers?.authorization?.split(" ")[1];
+  console.log(token);
+  if (!token) return res.status(401).send({ message: "Unauthorized Access!" });
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.tokenEmail = decoded.email;
+    console.log(decoded);
     next();
-  });
+  } catch (err) {
+    console.log(err);
+    return res.status(401).send({ message: "Unauthorized Access!", err });
+  }
 };
 
 // ============================================
@@ -73,7 +63,7 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // Request logging middleware
@@ -81,21 +71,6 @@ app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
 });
-
-
-
-// Role verification middleware
-const verifyRole = (...allowedRoles) => {
-  return (req, res, next) => {
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied. Insufficient permissions.",
-      });
-    }
-    next();
-  };
-};
 
 // ============================================
 // MONGODB CONNECTION
@@ -114,6 +89,7 @@ let usersCollection;
 let ticketsCollection;
 let bookingCollection;
 let transactionsCollection;
+let roleRequestsCollection;
 
 async function connectDB() {
   try {
@@ -122,6 +98,10 @@ async function connectDB() {
     console.log("✅ MongoDB Connected Successfully");
 
     db = client.db("MavenusDB");
+    
+
+    // In connectDB() function, add:
+    roleRequestsCollection = db.collection("roleRequests");
     usersCollection = db.collection("users");
     ticketsCollection = db.collection("ticketsCollection");
     bookingCollection = db.collection("bookingCollection");
@@ -134,7 +114,6 @@ async function connectDB() {
     await bookingCollection.createIndex({ userId: 1 });
     await bookingCollection.createIndex({ ticketId: 1 });
     await usersCollection.createIndex({ email: 1 }, { unique: true });
-    await usersCollection.createIndex({ uid: 1 }, { unique: true });
 
     console.log("Database: MavenusDB");
     console.log("Collections and indexes ready");
@@ -144,315 +123,709 @@ async function connectDB() {
   }
 }
 
-connectDB();
-
-
-
-// Get current user info
+// GET current user info (for useRole hook)
+// ✅ FIX 1: GET current user info (FIXED - add better error handling)
 app.get("/api/auth/me", verifyToken, async (req, res) => {
   try {
-    const user = await usersCollection.findOne(
-      { uid: req.user.uid },
-      { projection: { createdAt: 0, updatedAt: 0 } } // Clean projection
-    );
+    console.log("🔍 /api/auth/me - Email from token:", req.tokenEmail); // Debug
+    
+    const user = await usersCollection.findOne({ email: req.tokenEmail });
 
     if (!user) {
+      console.log("❌ /api/auth/me - User not found in database"); // Debug
       return res.status(404).json({
         success: false,
-        message: "User not found",
+        message: "User not found in database. Please re-login.",
       });
     }
 
-    res.json({ success: true, data: user });
+    console.log("✅ /api/auth/me - User found:", user.email, "Role:", user.role); // Debug
+
+    res.json({
+      success: true,
+      data: {
+        _id: user._id,
+        email: user.email,
+        displayName: user.displayName,
+        photoURL: user.photoURL,
+        role: user.role || "user", // Always return a role
+        isFraud: user.isFraud || false,
+      },
+    });
   } catch (error) {
-    console.error("Get user error:", error);
+    console.error("❌ /api/auth/me - Error:", error); // Debug
     res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
-// Update user profile
-app.put("/api/auth/profile", async (req, res) => {
-  try {
-    const { name, photoURL } = req.body;
 
-    const result = await usersCollection.findOneAndUpdate(
-      { uid: req.user.uid },
-      {
-        $set: {
-          name,
-          photoURL,
-          updatedAt: new Date(),
-        },
-      },
-      { returnDocument: "after" }
+// ✅ FIX 2: User registration/login route (ENSURE ROLE IS SAVED)
+app.post("/user", async (req, res) => {
+  try {
+    const userData = req.body;
+    console.log("🔍 /user - Received data:", userData.email); // Debug
+
+    const query = { email: userData.email };
+    
+    // Check if user exists
+    const existingUser = await usersCollection.findOne(query);
+    
+    if (existingUser) {
+      console.log("✅ /user - Existing user found:", existingUser.email, "Role:", existingUser.role); // Debug
+      
+      // User exists - ONLY update last login and profile data, DON'T CHANGE ROLE
+      await usersCollection.updateOne(
+        query,
+        {
+          $set: {
+            last_loggedIn: new Date().toISOString(),
+            photoURL: userData.photoURL || existingUser.photoURL,
+            displayName: userData.displayName || existingUser.displayName
+          }
+        }
+      );
+      
+      // Fetch updated user
+      const updatedUser = await usersCollection.findOne(query);
+      
+      return res.send({
+        message: "User logged in",
+        user: updatedUser,
+      });
+    }
+    
+    // New user - create with "user" role
+    const newUser = {
+      email: userData.email,
+      displayName: userData.displayName || "User",
+      photoURL: userData.photoURL || null,
+      uid: userData.uid,
+      role: "user", // ✅ CRITICAL: Default role for new users
+      isFraud: false,
+      created_at: new Date().toISOString(),
+      last_loggedIn: new Date().toISOString(),
+    };
+    
+    const result = await usersCollection.insertOne(newUser);
+    
+    console.log("✅ /user - New user created:", newUser.email, "Role:", newUser.role); // Debug
+    
+    res.send({
+      message: "User created",
+      user: newUser,
+    });
+  } catch (err) {
+    console.error("❌ /user - Error:", err); // Debug
+    res.status(500).send({ 
+      error: "Server error during user save/update",
+      details: err.message 
+    });
+  }
+});
+
+// app.post("/user", async (req, res) => {
+//   try {
+//     const userData = req.body;
+
+//     const query = { email: userData.email };
+//     const update = {
+//       $set: {
+//         email: userData.email,
+//         displayName: userData.displayName,
+//         photoURL: userData.photoURL,
+//         uid: userData.uid, // Firebase UID
+//         role: userData.role || "user",
+//         last_loggedIn: new Date().toISOString(),
+//       },
+//       $setOnInsert: {
+//         created_at: new Date().toISOString(),
+//       },
+//     };
+
+//     const result = await usersCollection.updateOne(query, update, {
+//       upsert: true,
+//     });
+
+//     // Return the user document
+//     const user = await usersCollection.findOne(query);
+
+//     res.send({
+//       message: result.matchedCount > 0 ? "User updated" : "User created",
+//       user,
+//     });
+//   } catch (err) {
+//     console.error("Error in /user:", err);
+//     res.status(500).send({ error: "Server error during user save/update" });
+//   }
+// });
+
+    // get a user's role
+    app.get("/user/role", verifyToken, async (req, res) => {
+      const result = await usersCollection.findOne({ email: req.tokenEmail });
+      res.send({ role: result?.role });
+    });
+    // ============================================
+    // TICKET ROUTES (PROTECTED)
+    // ============================================
+
+    // GET all approved tickets
+    app.get("/api/tickets", async (req, res) => {
+      try {
+        const {
+          from,
+          to,
+          transportType,
+          sortBy,
+          page = 1,
+          limit = 9,
+        } = req.query;
+
+        let query = { status: "approved" };
+
+        if (from) query.from = { $regex: from, $options: "i" };
+        if (to) query.to = { $regex: to, $options: "i" };
+        if (transportType) query.transportType = transportType;
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        let sort = {};
+        if (sortBy === "price-asc") sort.price = 1;
+        if (sortBy === "price-desc") sort.price = -1;
+        if (!sortBy) sort.createdAt = -1;
+
+        const tickets = await ticketsCollection
+          .find(query)
+          .sort(sort)
+          .skip(skip)
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await ticketsCollection.countDocuments(query);
+
+        res.json({
+          success: true,
+          data: tickets,
+          pagination: {
+            page: parseInt(page),
+            limit: parseInt(limit),
+            total,
+            pages: Math.ceil(total / parseInt(limit)),
+          },
+        });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // GET single ticket
+    app.get("/api/tickets/:id", verifyToken, async (req, res) => {
+      try {
+        const ticket = await ticketsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (!ticket) {
+          return res.status(404).json({
+            success: false,
+            message: "Ticket not found",
+          });
+        }
+
+        res.json({ success: true, data: ticket });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // GET latest tickets
+    app.get("/api/tickets/latest/all", async (req, res) => {
+      try {
+        const tickets = await ticketsCollection
+          .find({ status: "approved" })
+          .sort({ createdAt: -1 })
+          .limit(8)
+          .toArray();
+
+        res.json({ success: true, data: tickets });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // GET advertised tickets
+    app.get("/api/tickets/advertised/all", async (req, res) => {
+      try {
+        const tickets = await ticketsCollection
+          .find({
+            status: "approved",
+            isAdvertised: true,
+          })
+          .limit(6)
+          .toArray();
+
+        res.json({ success: true, data: tickets });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // GET vendor's tickets
+    app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
+      try {
+        const tickets = await ticketsCollection
+          .find({ vendorId: req.params.vendorId })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json({ success: true, data: tickets });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // POST create ticket (vendor only)
+    app.post(
+      "/api/tickets",
+      verifyToken,
+     
+      async (req, res) => {
+        try {
+          // Check if vendor is marked as fraud
+          const vendor = await usersCollection.findOne({ uid: req.user.uid });
+
+          if (vendor.isFraud) {
+            return res.status(403).json({
+              success: false,
+              message: "Your account has been flagged. Cannot add tickets.",
+            });
+          }
+
+          const ticketData = {
+            ...req.body,
+            vendorId: req.user.userId,
+            status: "pending",
+            isAdvertised: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+
+          const result = await ticketsCollection.insertOne(ticketData);
+          const newTicket = await ticketsCollection.findOne({
+            _id: result.insertedId,
+          });
+
+          res.status(201).json({
+            success: true,
+            message: "Ticket added successfully. Waiting for admin approval.",
+            data: newTicket,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
     );
 
-    res.json({
-      success: true,
-      message: "Profile updated successfully",
-      data: result.value,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
+    // PUT update ticket
+    app.put(
+      "/api/tickets/:id",
+      verifyToken,
+     
+      async (req, res) => {
+        try {
+          const updateData = {
+            ...req.body,
+            updatedAt: new Date(),
+          };
 
-// ============================================
-// TICKET ROUTES (PROTECTED)
-// ============================================
+          const result = await ticketsCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.id) },
+            { $set: updateData },
+            { returnDocument: "after" }
+          );
 
-// GET all approved tickets
-app.get("/api/tickets", async (req, res) => {
-  try {
-    const { from, to, transportType, sortBy, page = 1, limit = 9 } = req.query;
+          if (!result.value) {
+            return res.status(404).json({
+              success: false,
+              message: "Ticket not found",
+            });
+          }
 
-    let query = { status: "approved" };
+          res.json({
+            success: true,
+            message: "Ticket updated successfully",
+            data: result.value,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
 
-    if (from) query.from = { $regex: from, $options: "i" };
-    if (to) query.to = { $regex: to, $options: "i" };
-    if (transportType) query.transportType = transportType;
+    // DELETE ticket
+    app.delete(
+      "/api/tickets/:id",
+      verifyToken,
+      
+      async (req, res) => {
+        try {
+          const result = await ticketsCollection.deleteOne({
+            _id: new ObjectId(req.params.id),
+          });
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+          if (result.deletedCount === 0) {
+            return res.status(404).json({
+              success: false,
+              message: "Ticket not found",
+            });
+          }
 
-    let sort = {};
-    if (sortBy === "price-asc") sort.price = 1;
-    if (sortBy === "price-desc") sort.price = -1;
-    if (!sortBy) sort.createdAt = -1;
+          res.json({
+            success: true,
+            message: "Ticket deleted successfully",
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
 
-    const tickets = await ticketsCollection
-      .find(query)
-      .sort(sort)
-      .skip(skip)
-      .limit(parseInt(limit))
-      .toArray();
+    // Role Request handling 
+    app.post("/api/role-requests", verifyToken, async (req, res) => {
+      try {
+        const { requestedRole } = req.body;
 
-    const total = await ticketsCollection.countDocuments(query);
+        // Validate requested role
+        if (!["vendor", "admin"].includes(requestedRole)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid role. Can only request: vendor or admin",
+          });
+        }
 
-    res.json({
-      success: true,
-      data: tickets,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / parseInt(limit)),
-      },
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
+        // Get current user
+        const user = await usersCollection.findOne({ email: req.tokenEmail });
 
-// GET single ticket
-app.get("/api/tickets/:id", verifyToken, async (req, res) => {
-  try {
-    const ticket = await ticketsCollection.findOne({
-      _id: new ObjectId(req.params.id),
-    });
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: "User not found",
+          });
+        }
 
-    if (!ticket) {
-      return res.status(404).json({
-        success: false,
-        message: "Ticket not found",
-      });
-    }
+        // Check if user already has this role or higher
+        if (user.role === requestedRole) {
+          return res.status(400).json({
+            success: false,
+            message: `You are already a ${requestedRole}`,
+          });
+        }
 
-    res.json({ success: true, data: ticket });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
+        if (user.role === "admin") {
+          return res.status(400).json({
+            success: false,
+            message: "You already have admin privileges",
+          });
+        }
 
-// GET latest tickets
-app.get("/api/tickets/latest/all", async (req, res) => {
-  try {
-    const tickets = await ticketsCollection
-      .find({ status: "approved" })
-      .sort({ createdAt: -1 })
-      .limit(8)
-      .toArray();
+        // Check for existing pending request
+        const existingRequest = await roleRequestsCollection.findOne({
+          userEmail: req.tokenEmail,
+          status: "pending",
+        });
 
-    res.json({ success: true, data: tickets });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
+        if (existingRequest) {
+          return res.status(400).json({
+            success: false,
+            message: "You already have a pending request",
+          });
+        }
 
-// GET advertised tickets
-app.get("/api/tickets/advertised/all", async (req, res) => {
-  try {
-    const tickets = await ticketsCollection
-      .find({
-        status: "approved",
-        isAdvertised: true,
-      })
-      .limit(6)
-      .toArray();
+        // Create role request
+        const roleRequest = {
+          userId: user._id.toString(),
+          userEmail: user.email,
+          userName: user.displayName || "User",
+          userPhoto: user.photoURL || null,
+          currentRole: user.role,
+          requestedRole: requestedRole,
+          status: "pending", // pending, approved, rejected
+          requestDate: new Date().toISOString(),
+          processedBy: null,
+          processedDate: null,
+          rejectionReason: null,
+        };
 
-    res.json({ success: true, data: tickets });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
+        const result = await roleRequestsCollection.insertOne(roleRequest);
+        const newRequest = await roleRequestsCollection.findOne({
+          _id: result.insertedId,
+        });
 
-// GET vendor's tickets
-app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
-  try {
-    const tickets = await ticketsCollection
-      .find({ vendorId: req.params.vendorId })
-      .sort({ createdAt: -1 })
-      .toArray();
+        console.log("✅ Role request created:", newRequest);
 
-    res.json({ success: true, data: tickets });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-// POST create ticket (vendor only)
-app.post(
-  "/api/tickets",
-   verifyToken,
-  verifyRole("vendor", "admin"),
-  async (req, res) => {
-    try {
-      // Check if vendor is marked as fraud
-      const vendor = await usersCollection.findOne({ uid: req.user.uid });
-
-      if (vendor.isFraud) {
-        return res.status(403).json({
+        res.status(201).json({
+          success: true,
+          message: `${requestedRole} request submitted successfully`,
+          data: newRequest,
+        });
+      } catch (error) {
+        console.error("Error creating role request:", error);
+        res.status(500).json({
           success: false,
-          message: "Your account has been flagged. Cannot add tickets.",
+          message: error.message,
         });
       }
+    });
 
-      const ticketData = {
-        ...req.body,
-        vendorId: req.user.userId,
-        status: "pending",
-        isAdvertised: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
+    // GET: Get user's own role requests
+    app.get("/api/role-requests/my-requests", verifyToken, async (req, res) => {
+      try {
+        const requests = await roleRequestsCollection
+          .find({ userEmail: req.tokenEmail })
+          .sort({ requestDate: -1 })
+          .toArray();
 
-      const result = await ticketsCollection.insertOne(ticketData);
-      const newTicket = await ticketsCollection.findOne({
-        _id: result.insertedId,
-      });
-
-      res.status(201).json({
-        success: true,
-        message: "Ticket added successfully. Waiting for admin approval.",
-        data: newTicket,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
-
-// PUT update ticket
-app.put(
-  "/api/tickets/:id",
-   verifyToken,
-  verifyRole("vendor", "admin"),
-  async (req, res) => {
-    try {
-      const updateData = {
-        ...req.body,
-        updatedAt: new Date(),
-      };
-
-      const result = await ticketsCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        { $set: updateData },
-        { returnDocument: "after" }
-      );
-
-      if (!result.value) {
-        return res.status(404).json({
+        res.json({
+          success: true,
+          data: requests,
+        });
+      } catch (error) {
+        console.error("Error fetching requests:", error);
+        res.status(500).json({
           success: false,
-          message: "Ticket not found",
+          message: error.message,
         });
       }
+    });
 
-      res.json({
-        success: true,
-        message: "Ticket updated successfully",
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
+    // GET: Get all pending role requests (Admin only)
+    app.get("/api/admin/role-requests", verifyToken, async (req, res) => {
+      try {
+        // Verify user is admin
+        const adminUser = await usersCollection.findOne({
+          email: req.tokenEmail,
+        });
 
-// DELETE ticket
-app.delete(
-  "/api/tickets/:id",
-   verifyToken,
-  verifyRole("vendor", "admin"),
-  async (req, res) => {
-    try {
-      const result = await ticketsCollection.deleteOne({
-        _id: new ObjectId(req.params.id),
-      });
+        if (adminUser.role !== "admin") {
+          return res.status(403).json({
+            success: false,
+            message: "Only admins can access this endpoint",
+          });
+        }
 
-      if (result.deletedCount === 0) {
-        return res.status(404).json({
+        const { status } = req.query;
+
+        let query = {};
+        if (status && ["pending", "approved", "rejected"].includes(status)) {
+          query.status = status;
+        }
+
+        const requests = await roleRequestsCollection
+          .find(query)
+          .sort({ requestDate: -1 })
+          .toArray();
+
+        res.json({
+          success: true,
+          data: requests,
+        });
+      } catch (error) {
+        console.error("Error fetching role requests:", error);
+        res.status(500).json({
           success: false,
-          message: "Ticket not found",
+          message: error.message,
         });
       }
+    });
 
-      res.json({
-        success: true,
-        message: "Ticket deleted successfully",
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
+    // PUT: Approve or reject role request (Admin only)
+    app.put(
+      "/api/admin/role-requests/:requestId",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const { action, rejectionReason } = req.body; // "approve" or "reject"
 
-// ============================================
-// BOOKING ROUTES (PROTECTED)
-// ============================================
+          // Verify user is admin
+          const adminUser = await usersCollection.findOne({
+            email: req.tokenEmail,
+          });
 
-// POST create booking
-app.post("/api/bookings", verifyToken,  async (req, res) => {
+          if (adminUser.role !== "admin") {
+            return res.status(403).json({
+              success: false,
+              message: "Only admins can process role requests",
+            });
+          }
+
+          if (!["approve", "reject"].includes(action)) {
+            return res.status(400).json({
+              success: false,
+              message: "Invalid action. Must be 'approve' or 'reject'",
+            });
+          }
+
+          // Get the request
+          const request = await roleRequestsCollection.findOne({
+            _id: new ObjectId(req.params.requestId),
+          });
+
+          if (!request) {
+            return res.status(404).json({
+              success: false,
+              message: "Request not found",
+            });
+          }
+
+          if (request.status !== "pending") {
+            return res.status(400).json({
+              success: false,
+              message: `Request already ${request.status}`,
+            });
+          }
+
+          // If approving, update user's role
+          if (action === "approve") {
+            const updateResult = await usersCollection.findOneAndUpdate(
+              { email: request.userEmail },
+              {
+                $set: {
+                  role: request.requestedRole,
+                  updatedAt: new Date().toISOString(),
+                },
+              },
+              { returnDocument: "after" }
+            );
+
+            if (!updateResult.value) {
+              return res.status(404).json({
+                success: false,
+                message: "User not found",
+              });
+            }
+
+            console.log(
+              `✅ User role updated: ${request.userEmail} → ${request.requestedRole}`
+            );
+          }
+
+          // Update request status
+          const updatedRequest = await roleRequestsCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.requestId) },
+            {
+              $set: {
+                status: action === "approve" ? "approved" : "rejected",
+                processedBy: adminUser.email,
+                processedDate: new Date().toISOString(),
+                rejectionReason: action === "reject" ? rejectionReason : null,
+              },
+            },
+            { returnDocument: "after" }
+          );
+
+          res.json({
+            success: true,
+            message: `Request ${action}d successfully`,
+            data: updatedRequest.value,
+          });
+        } catch (error) {
+          console.error("Error processing role request:", error);
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // DELETE: Cancel own pending request
+    app.delete(
+      "/api/role-requests/:requestId",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const request = await roleRequestsCollection.findOne({
+            _id: new ObjectId(req.params.requestId),
+            userEmail: req.tokenEmail,
+          });
+
+          if (!request) {
+            return res.status(404).json({
+              success: false,
+              message: "Request not found",
+            });
+          }
+
+          if (request.status !== "pending") {
+            return res.status(400).json({
+              success: false,
+              message: "Can only cancel pending requests",
+            });
+          }
+
+          await roleRequestsCollection.deleteOne({
+            _id: new ObjectId(req.params.requestId),
+          });
+
+          res.json({
+            success: true,
+            message: "Request cancelled successfully",
+          });
+        } catch (error) {
+          console.error("Error cancelling request:", error);
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // ============================================
+    // BOOKING ROUTES (PROTECTED)
+    // ============================================
+
+    // POST create booking
+// FIXED: POST create booking - Update this in your index.js
+// FIXED: POST create booking - Update this in your index.js
+app.post("/api/bookings", verifyToken, async (req, res) => {
   try {
     const { ticketId, bookingQuantity } = req.body;
 
+    // Validate input
+    if (!ticketId || !bookingQuantity) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields: ticketId and bookingQuantity",
+      });
+    }
+
+    // Get ticket
     const ticket = await ticketsCollection.findOne({
       _id: new ObjectId(ticketId),
     });
@@ -471,13 +844,22 @@ app.post("/api/bookings", verifyToken,  async (req, res) => {
       });
     }
 
-    const user = await usersCollection.findOne({ uid: req.user.uid });
+    // FIX: Get user from MongoDB using tokenEmail
+    const user = await usersCollection.findOne({ email: req.tokenEmail });
 
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found in database. Please re-login.",
+      });
+    }
+
+    // Create booking with proper user data
     const bookingData = {
-      userId: user._id.toString(),
-      userName: user.name,
+      userId: user._id.toString(), // MongoDB user ID
+      userName: user.displayName || user.name || "User",
       userEmail: user.email,
-      ticketId,
+      ticketId: ticketId,
       ticketTitle: ticket.title,
       bookingQuantity: parseInt(bookingQuantity),
       unitPrice: ticket.price,
@@ -486,6 +868,8 @@ app.post("/api/bookings", verifyToken,  async (req, res) => {
       to: ticket.to,
       departureDate: ticket.departureDate,
       departureTime: ticket.departureTime,
+      transportType: ticket.transportType,
+      image: ticket.image, // Add image for display
       status: "pending",
       transactionId: null,
       paymentDate: null,
@@ -504,23 +888,40 @@ app.post("/api/bookings", verifyToken,  async (req, res) => {
       data: newBooking,
     });
   } catch (error) {
+    console.error("Booking creation error:", error);
     res.status(500).json({
       success: false,
-      message: error.message,
+      message: error.message || "Failed to create booking",
+      error: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   }
 });
 
-// GET user's bookings
-app.get("/api/bookings/user/:userId",  verifyToken,  async (req, res) => {
+    // FIXED: GET user's bookings - Update this in your index.js
+app.get("/api/bookings/user/", verifyToken, async (req, res) => {
   try {
+    // FIX: Get user from MongoDB first
+    const user = await usersCollection.findOne({ email: req.tokenEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Get bookings using MongoDB user ID
     const bookings = await bookingCollection
-      .find({ userId: req.params.userId })
+      .find({ userId: user._id.toString() })
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.json({ success: true, data: bookings });
+    res.json({ 
+      success: true, 
+      data: bookings 
+    });
   } catch (error) {
+    console.error("Get bookings error:", error);
     res.status(500).json({
       success: false,
       message: error.message,
@@ -528,444 +929,445 @@ app.get("/api/bookings/user/:userId",  verifyToken,  async (req, res) => {
   }
 });
 
-// GET bookings for vendor's tickets
-app.get(
-  "/api/bookings/vendor/:vendorId",
-  verifyToken,
-  verifyRole("vendor", "admin"),
-  async (req, res) => {
-    try {
-      const vendorTickets = await ticketsCollection
-        .find({ vendorId: req.params.vendorId })
-        .project({ _id: 1 })
-        .toArray();
+    // GET bookings for vendor's tickets
+    app.get(
+      "/api/bookings/vendor/:vendorId",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const vendorTickets = await ticketsCollection
+            .find({ vendorId: req.params.vendorId })
+            .project({ _id: 1 })
+            .toArray();
 
-      const ticketIds = vendorTickets.map((t) => t._id.toString());
+          const ticketIds = vendorTickets.map((t) => t._id.toString());
 
-      const bookings = await bookingCollection
-        .find({ ticketId: { $in: ticketIds } })
-        .sort({ createdAt: -1 })
-        .toArray();
+          const bookings = await bookingCollection
+            .find({ ticketId: { $in: ticketIds } })
+            .sort({ createdAt: -1 })
+            .toArray();
 
-      res.json({ success: true, data: bookings });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
-
-// PUT update booking status
-app.put(
-  "/api/bookings/:id/status",
-  verifyToken,
-  verifyRole("vendor", "admin"),
-  async (req, res) => {
-    try {
-      const { status } = req.body;
-
-      const result = await bookingCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        {
-          $set: {
-            status,
-            updatedAt: new Date(),
-          },
-        },
-        { returnDocument: "after" }
-      );
-
-      if (!result.value) {
-        return res.status(404).json({
-          success: false,
-          message: "Booking not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        message: `Booking ${status} successfully`,
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
-
-// ============================================
-// STRIPE PAYMENT ROUTES
-// ============================================
-
-// Create Stripe checkout session
-app.post("/api/payment/create-session", verifyToken ,  async (req, res) => {
-  try {
-    const { bookingId } = req.body;
-
-    const booking = await bookingCollection.findOne({
-      _id: new ObjectId(bookingId),
-    });
-
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: "Booking not found",
-      });
-    }
-
-    if (booking.status !== "accepted") {
-      return res.status(400).json({
-        success: false,
-        message: "Booking must be accepted by vendor before payment",
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "bdt",
-            product_data: {
-              name: booking.ticketTitle,
-              description: `${booking.from} → ${booking.to}`,
-            },
-            unit_amount: Math.round(booking.totalPrice * 100),
-          },
-          quantity: 1,
-        },
-      ],
-      mode: "payment",
-      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.CLIENT_URL}/dashboard/user/bookings`,
-      metadata: {
-        bookingId: bookingId,
-        userId: booking.userId,
-      },
-    });
-
-    res.json({
-      success: true,
-      sessionId: session.id,
-      url: session.url,
-    });
-  } catch (error) {
-    console.error("Stripe error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-// Verify payment and update booking
-app.post("/api/payment/verify", verifyToken, async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-    if (session.payment_status === "paid") {
-      const bookingId = session.metadata.bookingId;
-      const booking = await bookingCollection.findOne({
-        _id: new ObjectId(bookingId),
-      });
-
-      // Update booking
-      await bookingCollection.updateOne(
-        { _id: new ObjectId(bookingId) },
-        {
-          $set: {
-            status: "paid",
-            transactionId: session.payment_intent,
-            paymentDate: new Date(),
-            updatedAt: new Date(),
-          },
-        }
-      );
-
-      // Reduce ticket quantity
-      await ticketsCollection.updateOne(
-        { _id: new ObjectId(booking.ticketId) },
-        { $inc: { ticketQuantity: -booking.bookingQuantity } }
-      );
-
-      // Create transaction record
-      await transactionsCollection.insertOne({
-        transactionId: session.payment_intent,
-        userId: booking.userId,
-        bookingId: bookingId,
-        ticketTitle: booking.ticketTitle,
-        amount: booking.totalPrice,
-        paymentDate: new Date(),
-        paymentMethod: "card",
-        status: "completed",
-        createdAt: new Date(),
-      });
-
-      res.json({
-        success: true,
-        message: "Payment verified successfully",
-      });
-    } else {
-      res.status(400).json({
-        success: false,
-        message: "Payment not completed",
-      });
-    }
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-// GET user's transactions
-app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
-  try {
-    const transactions = await transactionsCollection
-      .find({ userId: req.params.userId })
-      .sort({ paymentDate: -1 })
-      .toArray();
-
-    res.json({ success: true, data: transactions });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
-// ============================================
-// ADMIN ROUTES (PROTECTED)
-// ============================================
-
-// GET all tickets
-app.get(
-  "/api/admin/tickets",
-   verifyToken ,
-  verifyRole("admin"),
-  async (req, res) => {
-    try {
-      const tickets = await ticketsCollection
-        .find({})
-        .sort({ createdAt: -1 })
-        .toArray();
-
-      res.json({ success: true, data: tickets });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
-
-// PUT approve/reject ticket
-app.put(
-  "/api/admin/tickets/:id/status",
-   verifyToken ,
-  verifyRole("admin"),
-  async (req, res) => {
-    try {
-      const { status } = req.body;
-
-      const result = await ticketsCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        {
-          $set: {
-            status,
-            updatedAt: new Date(),
-          },
-        },
-        { returnDocument: "after" }
-      );
-
-      if (!result.value) {
-        return res.status(404).json({
-          success: false,
-          message: "Ticket not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        message: `Ticket ${status} successfully`,
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
-
-// PUT toggle advertisement
-app.put(
-  "/api/admin/tickets/:id/advertise",
-   verifyToken ,
-  verifyRole("admin"),
-  async (req, res) => {
-    try {
-      const { isAdvertised } = req.body;
-
-      if (isAdvertised) {
-        const count = await ticketsCollection.countDocuments({
-          isAdvertised: true,
-          _id: { $ne: new ObjectId(req.params.id) },
-        });
-
-        if (count >= 6) {
-          return res.status(400).json({
+          res.json({ success: true, data: bookings });
+        } catch (error) {
+          res.status(500).json({
             success: false,
-            message: "Maximum 6 tickets can be advertised at a time",
+            message: error.message,
           });
         }
       }
+    );
 
-      const result = await ticketsCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        {
-          $set: {
-            isAdvertised,
-            updatedAt: new Date(),
+    // PUT update booking status
+    app.put(
+      "/api/bookings/:id/status",
+      verifyToken,
+
+      async (req, res) => {
+        try {
+          const { status } = req.body;
+
+          const result = await bookingCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.id) },
+            {
+              $set: {
+                status,
+                updatedAt: new Date(),
+              },
+            },
+            { returnDocument: "after" }
+          );
+
+          if (!result.value) {
+            return res.status(404).json({
+              success: false,
+              message: "Booking not found",
+            });
+          }
+
+          res.json({
+            success: true,
+            message: `Booking ${status} successfully`,
+            data: result.value,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // ============================================
+    // STRIPE PAYMENT ROUTES
+    // ============================================
+
+    // Create Stripe checkout session
+    app.post("/api/payment/create-session", verifyToken, async (req, res) => {
+      try {
+        const { bookingId } = req.body;
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(bookingId),
+        });
+
+        if (!booking) {
+          return res.status(404).json({
+            success: false,
+            message: "Booking not found",
+          });
+        }
+
+        if (booking.status !== "accepted") {
+          return res.status(400).json({
+            success: false,
+            message: "Booking must be accepted by vendor before payment",
+          });
+        }
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "bdt",
+                product_data: {
+                  name: booking.ticketTitle,
+                  description: `${booking.from} → ${booking.to}`,
+                },
+                unit_amount: Math.round(booking.totalPrice * 100),
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+          success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/dashboard/user/bookings`,
+          metadata: {
+            bookingId: bookingId,
+            userId: booking.userId,
           },
-        },
-        { returnDocument: "after" }
-      );
+        });
 
-      if (!result.value) {
-        return res.status(404).json({
+        res.json({
+          success: true,
+          sessionId: session.id,
+          url: session.url,
+        });
+      } catch (error) {
+        console.error("Stripe error:", error);
+        res.status(500).json({
           success: false,
-          message: "Ticket not found",
+          message: error.message,
         });
       }
+    });
 
-      res.json({
-        success: true,
-        message: isAdvertised ? "Ticket advertised" : "Advertisement removed",
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
+    // Verify payment and update booking
+    app.post("/api/payment/verify", verifyToken, async (req, res) => {
+      try {
+        const { sessionId } = req.body;
 
-// GET all users
-app.get(
-  "/api/admin/users",
-   verifyToken ,
-  verifyRole("admin"),
-  async (req, res) => {
-    try {
-      const users = await usersCollection
-        .find({})
-        .project({ password: 0 })
-        .toArray();
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-      res.json({ success: true, data: users });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
+        if (session.payment_status === "paid") {
+          const bookingId = session.metadata.bookingId;
+          const booking = await bookingCollection.findOne({
+            _id: new ObjectId(bookingId),
+          });
 
-// PUT update user role
-app.put(
-  "/api/admin/users/:id/role",
-   verifyToken ,
-  verifyRole("admin"),
-  async (req, res) => {
-    try {
-      const { role } = req.body;
+          // Update booking
+          await bookingCollection.updateOne(
+            { _id: new ObjectId(bookingId) },
+            {
+              $set: {
+                status: "paid",
+                transactionId: session.payment_intent,
+                paymentDate: new Date(),
+                updatedAt: new Date(),
+              },
+            }
+          );
 
-      const result = await usersCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        { $set: { role, updatedAt: new Date() } },
-        { returnDocument: "after" }
-      );
+          // Reduce ticket quantity
+          await ticketsCollection.updateOne(
+            { _id: new ObjectId(booking.ticketId) },
+            { $inc: { ticketQuantity: -booking.bookingQuantity } }
+          );
 
-      if (!result.value) {
-        return res.status(404).json({
+          // Create transaction record
+          await transactionsCollection.insertOne({
+            transactionId: session.payment_intent,
+            userId: booking.userId,
+            bookingId: bookingId,
+            ticketTitle: booking.ticketTitle,
+            amount: booking.totalPrice,
+            paymentDate: new Date(),
+            paymentMethod: "card",
+            status: "completed",
+            createdAt: new Date(),
+          });
+
+          res.json({
+            success: true,
+            message: "Payment verified successfully",
+          });
+        } else {
+          res.status(400).json({
+            success: false,
+            message: "Payment not completed",
+          });
+        }
+      } catch (error) {
+        res.status(500).json({
           success: false,
-          message: "User not found",
+          message: error.message,
         });
       }
+    });
 
-      res.json({
-        success: true,
-        message: `User role updated to ${role}`,
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
+    // GET user's transactions
+    app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
+      try {
+        const transactions = await transactionsCollection
+          .find({ userId: req.params.userId })
+          .sort({ paymentDate: -1 })
+          .toArray();
 
-// PUT mark vendor as fraud
-app.put(
-  "/api/admin/users/:id/fraud",
-   verifyToken , 
-  verifyRole("admin"),
-  async (req, res) => {
-    try {
-      const { isFraud } = req.body;
-
-      const result = await usersCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        { $set: { isFraud, updatedAt: new Date() } },
-        { returnDocument: "after" }
-      );
-
-      if (!result.value) {
-        return res.status(404).json({
+        res.json({ success: true, data: transactions });
+      } catch (error) {
+        res.status(500).json({
           success: false,
-          message: "User not found",
+          message: error.message,
         });
       }
+    });
 
-      if (isFraud) {
-        await ticketsCollection.updateMany(
-          { vendorId: req.params.id },
-          { $set: { status: "rejected" } }
-        );
+    // ============================================
+    // ADMIN ROUTES (PROTECTED)
+    // ============================================
+
+    // GET all tickets
+    app.get(
+      "/api/admin/tickets",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const tickets = await ticketsCollection
+            .find({})
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          res.json({ success: true, data: tickets });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
       }
+    );
 
-      res.json({
-        success: true,
-        message: isFraud ? "Vendor marked as fraud" : "Fraud status removed",
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
+    // PUT approve/reject ticket
+    app.put(
+      "/api/admin/tickets/:id/status",
+      verifyToken,
 
+      async (req, res) => {
+        try {
+          const { status } = req.body;
+
+          const result = await ticketsCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.id) },
+            {
+              $set: {
+                status,
+                updatedAt: new Date(),
+              },
+            },
+            { returnDocument: "after" }
+          );
+
+          if (!result.value) {
+            return res.status(404).json({
+              success: false,
+              message: "Ticket not found",
+            });
+          }
+
+          res.json({
+            success: true,
+            message: `Ticket ${status} successfully`,
+            data: result.value,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // PUT toggle advertisement
+    app.put(
+      "/api/admin/tickets/:id/advertise",
+      verifyToken,
+   
+      async (req, res) => {
+        try {
+          const { isAdvertised } = req.body;
+
+          if (isAdvertised) {
+            const count = await ticketsCollection.countDocuments({
+              isAdvertised: true,
+              _id: { $ne: new ObjectId(req.params.id) },
+            });
+
+            if (count >= 6) {
+              return res.status(400).json({
+                success: false,
+                message: "Maximum 6 tickets can be advertised at a time",
+              });
+            }
+          }
+
+          const result = await ticketsCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.id) },
+            {
+              $set: {
+                isAdvertised,
+                updatedAt: new Date(),
+              },
+            },
+            { returnDocument: "after" }
+          );
+
+          if (!result.value) {
+            return res.status(404).json({
+              success: false,
+              message: "Ticket not found",
+            });
+          }
+
+          res.json({
+            success: true,
+            message: isAdvertised
+              ? "Ticket advertised"
+              : "Advertisement removed",
+            data: result.value,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // GET all users
+    app.get(
+      "/api/admin/users",
+      verifyToken,
+      
+      async (req, res) => {
+        try {
+          const users = await usersCollection
+            .find({})
+            .project({ password: 0 })
+            .toArray();
+
+          res.json({ success: true, data: users });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // PUT update user role
+    app.put(
+      "/api/admin/users/:id/role",
+      verifyToken,
+      
+      async (req, res) => {
+        try {
+          const { role } = req.body;
+
+          const result = await usersCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { role, updatedAt: new Date() } },
+            { returnDocument: "after" }
+          );
+
+          if (!result.value) {
+            return res.status(404).json({
+              success: false,
+              message: "User not found",
+            });
+          }
+
+          res.json({
+            success: true,
+            message: `User role updated to ${role}`,
+            data: result.value,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
+
+    // PUT mark vendor as fraud
+    app.put(
+      "/api/admin/users/:id/fraud",
+      verifyToken,
+   
+      async (req, res) => {
+        try {
+          const { isFraud } = req.body;
+
+          const result = await usersCollection.findOneAndUpdate(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { isFraud, updatedAt: new Date() } },
+            { returnDocument: "after" }
+          );
+
+          if (!result.value) {
+            return res.status(404).json({
+              success: false,
+              message: "User not found",
+            });
+          }
+
+          if (isFraud) {
+            await ticketsCollection.updateMany(
+              { vendorId: req.params.id },
+              { $set: { status: "rejected" } }
+            );
+          }
+
+          res.json({
+            success: true,
+            message: isFraud
+              ? "Vendor marked as fraud"
+              : "Fraud status removed",
+            data: result.value,
+          });
+        } catch (error) {
+          res.status(500).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    );
 // ============================================
 // ERROR HANDLING
 // ============================================
@@ -986,18 +1388,25 @@ app.use((error, req, res, next) => {
   });
 });
 
+connectDB().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🔒 JWT Authentication enabled`);
+    console.log(`💳 Stripe Payment enabled`);
+  });
+});
 // ============================================
 // START SERVER
 // ============================================
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🔒 JWT Authentication enabled`);
-  console.log(`💳 Stripe Payment enabled`);
-});
+// app.listen(PORT, () => {
+//   console.log(`🚀 Server running on port ${PORT}`);
+//   console.log(`🔒 JWT Authentication enabled`);
+//   console.log(`💳 Stripe Payment enabled`);
+// });
 
-process.on("SIGINT", async () => {
-  console.log("\n🛑 Shutting down gracefully...");
-  await client.close();
-  console.log("MongoDB connection closed!");
-  process.exit(0);
-});
+// process.on("SIGNIN", async () => {
+//   console.log("\n🛑 Shutting down gracefully...");
+//   await client.close();
+//   console.log("MongoDB connection closed!");
+//   process.exit(0);
+// });
