@@ -167,6 +167,18 @@ app.post("/user", async (req, res) => {
     const userData = req.body;
     console.log("🔍 /user - Received data:", userData.email); // Debug
 
+    // If a password is provided (optional), validate it server-side
+    if (userData.password) {
+      const p = userData.password;
+      const pwdErrors = [];
+      if (typeof p !== "string" || p.length < 6) pwdErrors.push("Password must be at least 6 characters long.");
+      if (!/[A-Z]/.test(p)) pwdErrors.push("Password must contain at least one uppercase letter.");
+      if (!/[a-z]/.test(p)) pwdErrors.push("Password must contain at least one lowercase letter.");
+      if (pwdErrors.length > 0) {
+        return res.status(400).json({ success: false, message: pwdErrors.join(" ") });
+      }
+    }
+
     const query = { email: userData.email };
     
     // Check if user exists
@@ -222,6 +234,30 @@ app.post("/user", async (req, res) => {
       error: "Server error during user save/update",
       details: err.message 
     });
+  }
+});
+
+// Password validation endpoint - validates the password rules (length, uppercase, lowercase)
+app.post("/validate-password", async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ success: false, message: "Password is required" });
+    }
+
+    const errors = [];
+    if (password.length < 6) errors.push("Password must be at least 6 characters long.");
+    if (!/[A-Z]/.test(password)) errors.push("Password must contain at least one uppercase letter.");
+    if (!/[a-z]/.test(password)) errors.push("Password must contain at least one lowercase letter.");
+
+    if (errors.length > 0) {
+      return res.status(400).json({ success: false, message: errors.join(" ") });
+    }
+
+    return res.json({ success: true, message: "Password is valid" });
+  } catch (err) {
+    console.error("/validate-password error:", err);
+    return res.status(500).json({ success: false, message: "Server error validating password" });
   }
 });
 
