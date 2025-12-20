@@ -663,105 +663,134 @@ app.post("/user", async (req, res) => {
       }
     });
 
-    // PUT: Approve or reject role request (Admin only)
-    app.put(
-      "/api/admin/role-requests/:requestId",
-      verifyToken,
-      async (req, res) => {
-        try {
-          const { action, rejectionReason } = req.body; // "approve" or "reject"
+    // ============================================
+// FIXED: PUT /api/admin/role-requests/:requestId
+// Replace this in your index.js
+// ============================================
 
-          // Verify user is admin
-          const adminUser = await usersCollection.findOne({
-            email: req.tokenEmail,
-          });
+app.put(
+  "/api/admin/role-requests/:requestId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { action, rejectionReason } = req.body; // "approve" or "reject"
 
-          if (adminUser.role !== "admin") {
-            return res.status(403).json({
-              success: false,
-              message: "Only admins can process role requests",
-            });
-          }
+      console.log("🔍 Processing request:", req.params.requestId, "Action:", action);
 
-          if (!["approve", "reject"].includes(action)) {
-            return res.status(400).json({
-              success: false,
-              message: "Invalid action. Must be 'approve' or 'reject'",
-            });
-          }
+      // Verify user is admin
+      const adminUser = await usersCollection.findOne({
+        email: req.tokenEmail,
+      });
 
-          // Get the request
-          const request = await roleRequestsCollection.findOne({
-            _id: new ObjectId(req.params.requestId),
-          });
+      if (adminUser.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Only admins can process role requests",
+        });
+      }
 
-          if (!request) {
-            return res.status(404).json({
-              success: false,
-              message: "Request not found",
-            });
-          }
+      if (!["approve", "reject"].includes(action)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid action. Must be 'approve' or 'reject'",
+        });
+      }
 
-          if (request.status !== "pending") {
-            return res.status(400).json({
-              success: false,
-              message: `Request already ${request.status}`,
-            });
-          }
+      // Get the request
+      const request = await roleRequestsCollection.findOne({
+        _id: new ObjectId(req.params.requestId),
+      });
 
-          // If approving, update user's role
-          if (action === "approve") {
-            const updateResult = await usersCollection.findOneAndUpdate(
-              { email: request.userEmail },
-              {
-                $set: {
-                  role: request.requestedRole,
-                  updatedAt: new Date().toISOString(),
-                },
-              },
-              { returnDocument: "after" }
-            );
+      if (!request) {
+        return res.status(404).json({
+          success: false,
+          message: "Request not found",
+        });
+      }
 
-            if (!updateResult.value) {
-              return res.status(404).json({
-                success: false,
-                message: "User not found",
-              });
-            }
+      if (request.status !== "pending") {
+        return res.status(400).json({
+          success: false,
+          message: `Request already ${request.status}`,
+        });
+      }
 
-            console.log(
-              `✅ User role updated: ${request.userEmail} → ${request.requestedRole}`
-            );
-          }
+      console.log("✅ Request found:", request.userEmail, "→", request.requestedRole);
 
-          // Update request status
-          const updatedRequest = await roleRequestsCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.requestId) },
-            {
-              $set: {
-                status: action === "approve" ? "approved" : "rejected",
-                processedBy: adminUser.email,
-                processedDate: new Date().toISOString(),
-                rejectionReason: action === "reject" ? rejectionReason : null,
-              },
-            },
-            { returnDocument: "after" }
-          );
+      // If approving, update user's role
+      if (action === "approve") {
+        // ✅ FIX: Use email to find user, not _id
+        const userToUpdate = await usersCollection.findOne({ 
+          email: request.userEmail 
+        });
 
-          res.json({
-            success: true,
-            message: `Request ${action}d successfully`,
-            data: updatedRequest.value,
-          });
-        } catch (error) {
-          console.error("Error processing role request:", error);
-          res.status(500).json({
+        console.log("🔍 Looking for user:", request.userEmail);
+
+        if (!userToUpdate) {
+          console.log("❌ User not found in database:", request.userEmail);
+          return res.status(404).json({
             success: false,
-            message: error.message,
+            message: `User not found: ${request.userEmail}. They may need to log in again.`,
           });
         }
+
+        console.log("✅ User found:", userToUpdate.email, "Current role:", userToUpdate.role);
+
+        // Update the user's role
+        const updateResult = await usersCollection.findOneAndUpdate(
+          { email: request.userEmail }, // ✅ Use email, not _id
+          {
+            $set: {
+              role: request.requestedRole,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+          { returnDocument: "after" }
+        );
+
+        if (!updateResult.value) {
+          console.log("❌ Failed to update user");
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update user role",
+          });
+        }
+
+        console.log(
+          `✅ User role updated: ${request.userEmail} → ${request.requestedRole}`
+        );
       }
-    );
+
+      // Update request status
+      const updatedRequest = await roleRequestsCollection.findOneAndUpdate(
+        { _id: new ObjectId(req.params.requestId) },
+        {
+          $set: {
+            status: action === "approve" ? "approved" : "rejected",
+            processedBy: adminUser.email,
+            processedDate: new Date().toISOString(),
+            rejectionReason: action === "reject" ? rejectionReason : null,
+          },
+        },
+        { returnDocument: "after" }
+      );
+
+      console.log("✅ Request updated to:", updatedRequest.value.status);
+
+      res.json({
+        success: true,
+        message: `Request ${action}d successfully`,
+        data: updatedRequest.value,
+      });
+    } catch (error) {
+      console.error("❌ Error processing role request:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+);
 
     // DELETE: Cancel own pending request
     app.delete(
