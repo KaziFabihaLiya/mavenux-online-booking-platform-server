@@ -1,6 +1,6 @@
-// ============================================
+//  
 // UPDATED index.js - COMPLETE BACKEND WITH JWT & STRIPE
-// ============================================
+//  
 
 const express = require("express");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
@@ -45,9 +45,9 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// ============================================
+//  
 // STRIPE INIT (Now after dotenv.config())
-// ============================================
+//  
 let stripeClient;
 if (process.env.STRIPE_SECRET_KEY) {
   stripeClient = stripe(process.env.STRIPE_SECRET_KEY);
@@ -56,15 +56,16 @@ if (process.env.STRIPE_SECRET_KEY) {
   console.warn("STRIPE_SECRET_KEY missing - Payments disabled");
   stripeClient = { warning: true }; // Stub
 }
-// ============================================
+//  
 // MIDDLEWARE
-// ============================================
+//  
 app.use(
   cors({
     origin: [
       "http://localhost:5173",
       "http://localhost:5174",
       "http://localhost:3000",
+      "https://mavenux-online-booking-platform-cli.vercel.app",
     ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
@@ -87,9 +88,9 @@ app.get("/api/health", (req, res) => {
   res.json({ success: true, status: "ok", time: new Date().toISOString() });
 });
 
-// ============================================
+//  
 // MONGODB CONNECTION
-// ============================================
+//  
 const uri = process.env.MONGODB_URI;
 const client = new MongoClient(uri, {
   serverApi: {
@@ -130,8 +131,8 @@ async function connectDB() {
     await bookingCollection.createIndex({ userId: 1 });
     await bookingCollection.createIndex({ ticketId: 1 });
     await usersCollection.createIndex({ email: 1 }, { unique: true });
-    await bookingCollection.createIndex({ vendorId: 1 }); // ✅ NEW
-    await bookingCollection.createIndex({ vendorEmail: 1 }); // ✅ NEW
+    await bookingCollection.createIndex({ vendorId: 1 });
+    await bookingCollection.createIndex({ vendorEmail: 1 }); 
 
     console.log("Database: MavenusDB");
     console.log("Collections and indexes ready");
@@ -142,7 +143,7 @@ async function connectDB() {
 }
 
 // GET current user info (for useRole hook)
-// ✅ FIX 1: GET current user info (FIXED - add better error handling)
+// FIX 1: GET current user info (FIXED - add better error handling)
 app.get("/api/auth/me", verifyToken, async (req, res) => {
   try {
     console.log("🔍 /api/auth/me - Email from token:", req.tokenEmail); // Debug
@@ -362,9 +363,9 @@ app.get("/api/user/role", verifyToken, async (req, res) => {
   const result = await usersCollection.findOne({ email: req.tokenEmail });
   res.send({ role: result?.role });
 });
-// ============================================
+//  
 // TICKET ROUTES (PROTECTED)
-// ============================================
+//  
 
 // GET all approved tickets
 app.get("/api/tickets", async (req, res) => {
@@ -472,10 +473,10 @@ app.get("/api/tickets/advertised/all", async (req, res) => {
   }
 });
 
-// ============================================
+//  
 // FIXED: GET /api/tickets/vendor/me
 // Replace this endpoint in your index.js
-// ============================================
+//  
 
 app.get("/api/tickets/vendor/me", verifyToken, async (req, res) => {
   try {
@@ -919,10 +920,10 @@ app.get("/api/admin/role-requests", verifyToken, async (req, res) => {
   }
 });
 
-// ============================================
+//  
 // FIXED: PUT /api/admin/role-requests/:requestId
 // Replace this in your index.js
-// ============================================
+//  
 
 app.put(
   "/api/admin/role-requests/:requestId",
@@ -1102,9 +1103,9 @@ app.delete("/api/role-requests/:requestId", verifyToken, async (req, res) => {
   }
 });
 
-// ============================================
+//  
 // BOOKING ROUTES (PROTECTED)
-// ============================================
+//  
 
 // POST create booking
 // FIXED: POST create booking - Update this in your index.js
@@ -1290,9 +1291,9 @@ app.put("/api/bookings/:id/status", verifyToken, async (req, res) => {
   }
 });
 
-// ============================================
+//  
 // STRIPE PAYMENT ROUTES
-// ============================================
+//  
 
 // Create Stripe checkout session
 app.post("/api/payment/create-session", verifyToken, async (req, res) => {
@@ -1521,9 +1522,9 @@ app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
   }
 });
 
-// ============================================
+//  
 // ADMIN ROUTES (PROTECTED)
-// ============================================
+//  
 
 // GET all tickets
 app.get("/api/admin/tickets", verifyToken, async (req, res) => {
@@ -2002,9 +2003,9 @@ app.put(
     }
   }
 );
-// ============================================
+//  
 // ERROR HANDLING
-// ============================================
+//  
 
 app.use((req, res) => {
   res.status(404).json({
@@ -2029,9 +2030,9 @@ connectDB().then(() => {
     console.log(`💳 Stripe Payment enabled`);
   });
 });
-// ============================================
+//  
 // START SERVER
-// ============================================
+//  
 // app.listen(PORT, () => {
 //   console.log(`🚀 Server running on port ${PORT}`);
 //   console.log(`🔒 JWT Authentication enabled`);
