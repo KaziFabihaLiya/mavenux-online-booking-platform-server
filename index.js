@@ -125,6 +125,8 @@ async function connectDB() {
     await bookingCollection.createIndex({ userId: 1 });
     await bookingCollection.createIndex({ ticketId: 1 });
     await usersCollection.createIndex({ email: 1 }, { unique: true });
+    await bookingCollection.createIndex({ vendorId: 1 }); // ✅ NEW
+    await bookingCollection.createIndex({ vendorEmail: 1 }); // ✅ NEW
 
     console.log("Database: MavenusDB");
     console.log("Collections and indexes ready");
@@ -465,6 +467,82 @@ app.get("/api/tickets/advertised/all", async (req, res) => {
   }
 });
 
+// ============================================
+// FIXED: GET /api/tickets/vendor/me
+// Replace this endpoint in your index.js
+// ============================================
+
+app.get("/api/tickets/vendor/me", verifyToken, async (req, res) => {
+  try {
+    const vendorEmail = req.tokenEmail;
+
+    console.log("🎫 GET /api/tickets/vendor/me");
+    console.log("📧 Vendor email from token:", vendorEmail);
+
+    // Get vendor from database
+    const vendor = await usersCollection.findOne({ email: vendorEmail });
+
+    if (!vendor) {
+      console.log("❌ Vendor not found in database:", vendorEmail);
+      return res.json({
+        success: true,
+        data: [],
+        message: "Vendor not found. Please log in again.",
+      });
+    }
+
+    console.log("✅ Vendor found:", {
+      _id: vendor._id.toString(),
+      email: vendor.email,
+      role: vendor.role,
+    });
+
+    // Get vendor ID as string
+    const vendorIdString = vendor._id.toString();
+
+    // ✅ SIMPLE QUERY - Try email first, then ID
+    const tickets = await ticketsCollection
+      .find({
+        $or: [
+          { vendorEmail: vendorEmail }, // Direct email match
+          { vendorId: vendorIdString }, // String ID
+          { vendorId: vendor._id }, // ObjectId
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    console.log(`✅ Found ${tickets.length} tickets for ${vendorEmail}`);
+
+    if (tickets.length > 0) {
+      console.log("📦 Sample ticket:", {
+        _id: tickets[0]._id.toString(),
+        title: tickets[0].title,
+        vendorId: tickets[0].vendorId,
+        vendorIdType: typeof tickets[0].vendorId,
+        vendorEmail: tickets[0].vendorEmail,
+      });
+    }
+
+    // Prevent caching
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+
+    res.json({
+      success: true,
+      data: tickets,
+    });
+  } catch (error) {
+    console.error("❌ Error in /api/tickets/vendor/me:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      data: [],
+    });
+  }
+});
+
 // GET vendor's tickets
 app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
   try {
@@ -481,83 +559,6 @@ app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
     });
   }
 });
-
-// ============================================
-// FIXED: GET /api/tickets/vendor/me
-// Replace this endpoint in your index.js
-// ============================================
-
-app.get("/api/tickets/vendor/me", verifyToken, async (req, res) => {
-  try {
-    const vendorEmail = req.tokenEmail;
-
-    console.log("🎫 GET /api/tickets/vendor/me - Vendor:", vendorEmail);
-
-    // Resolve vendor document to enable matching by vendorId as either string or ObjectId
-    const vendor = await usersCollection.findOne({ email: vendorEmail });
-
-    // Create a case-insensitive regex and be tolerant of surrounding whitespace
-    const escapedEmail = vendorEmail.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
-    const emailRegex = new RegExp(`^\\s*${escapedEmail}\\s*$`, "i");
-
-    // Build $or conditions including:
-    // - vendorId as string
-    // - vendorId as ObjectId (if vendor exists)
-    // - vendorEmail (case-insensitive)
-    const orConditions = [{ vendorEmail: emailRegex }];
-    if (vendor) {
-      orConditions.unshift({ vendorId: vendor._id.toString() });
-      orConditions.unshift({ vendorId: vendor._id });
-    }
-
-    const query = { $or: orConditions };
-
-    // Diagnostic counts to help identify mismatches in stored documents
-    const countByVendorIdStr = vendor
-      ? await ticketsCollection.countDocuments({
-          vendorId: vendor._id.toString(),
-        })
-      : 0;
-    const countByVendorIdObj = vendor
-      ? await ticketsCollection.countDocuments({ vendorId: vendor._id })
-      : 0;
-    const countByEmail = await ticketsCollection.countDocuments({
-      vendorEmail: emailRegex,
-    });
-
-    console.log(
-      `/api/tickets/vendor/me - counts idStr:${countByVendorIdStr}, idObj:${countByVendorIdObj}, email:${countByEmail}`
-    );
-
-    const tickets = await ticketsCollection
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    console.log(`📊 Found ${tickets.length} tickets using query:`, query);
-
-    // Prevent caching so clients always get fresh results (avoid 304 Not Modified)
-    res.set(
-      "Cache-Control",
-      "no-store, no-cache, must-revalidate, proxy-revalidate"
-    );
-    res.set("Pragma", "no-cache");
-    res.set("Expires", "0");
-
-    res.json({
-      success: true,
-      data: tickets,
-    });
-  } catch (error) {
-    console.error("❌ Error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      data: [],
-    });
-  }
-});
-
 // DEBUG: Vendor ticket diagnostics (protected)
 app.get("/api/debug/vendor-tickets", verifyToken, async (req, res) => {
   try {
@@ -1102,123 +1103,130 @@ app.delete("/api/role-requests/:requestId", verifyToken, async (req, res) => {
 
 // POST create booking
 // FIXED: POST create booking - Update this in your index.js
-// FIXED: POST create booking - Update this in your index.js
+// POST a new booking
 app.post("/api/bookings", verifyToken, async (req, res) => {
   try {
-    const { ticketId, bookingQuantity } = req.body;
+    const { ticketId, price, ...otherData } = req.body;
+    const buyerEmail = req.tokenEmail; // Automatically extracted from JWT by verifyToken
 
-    // Validate input
-    if (!ticketId || !bookingQuantity) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing required fields: ticketId and bookingQuantity",
-      });
-    }
-
-    // Get ticket
+    // 1. Fetch the ticket to get the vendor's information
+    // This is the "bridge" that connects the buyer to the vendor
     const ticket = await ticketsCollection.findOne({
       _id: new ObjectId(ticketId),
     });
 
     if (!ticket) {
-      return res.status(404).json({
-        success: false,
-        message: "Ticket not found",
+      return res.status(404).json({ 
+        success: false, 
+        message: "Ticket not found. It may have been deleted by the vendor." 
       });
     }
 
-    if (ticket.ticketQuantity < bookingQuantity) {
-      return res.status(400).json({
-        success: false,
-        message: "Not enough tickets available",
-      });
-    }
-
-    // FIX: Get user from MongoDB using tokenEmail
-    const user = await usersCollection.findOne({ email: req.tokenEmail });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found in database. Please re-login.",
-      });
-    }
-
-    // Create booking with proper user data
-    const bookingData = {
-      userId: user._id.toString(), // MongoDB user ID
-      userName: user.displayName || user.name || "User",
-      userEmail: user.email,
+    // 2. Build the complete booking object
+    const newBooking = {
+      ...otherData,
       ticketId: ticketId,
       ticketTitle: ticket.title,
-      bookingQuantity: parseInt(bookingQuantity),
-      unitPrice: ticket.price,
-      totalPrice: ticket.price * bookingQuantity,
-      from: ticket.from,
-      to: ticket.to,
-      departureDate: ticket.departureDate,
-      departureTime: ticket.departureTime,
-      transportType: ticket.transportType,
-      image: ticket.image, // Add image for display
+      price: price,
+      
+      // VENDOR DATA: Required for "BookingRequest" tab
+      vendorId: ticket.vendorId,
+      vendorEmail: ticket.vendorEmail,
+      
+      // USER DATA: Required for "My Booked Tickets" tab
+      userEmail: buyerEmail, 
+      
+      // INITIAL STATE
       status: "pending",
-      transactionId: null,
-      paymentDate: null,
       createdAt: new Date(),
-      updatedAt: new Date(),
+      updatedAt: new Date()
     };
 
-    const result = await bookingCollection.insertOne(bookingData);
-    const newBooking = await bookingCollection.findOne({
-      _id: result.insertedId,
+    // 3. Save to database
+    const result = await bookingCollection.insertOne(newBooking);
+
+    // 4. Return success
+    res.json({ 
+      success: true, 
+      message: "Booking request sent successfully!",
+      insertedId: result.insertedId 
     });
 
-    res.status(201).json({
-      success: true,
-      message: "Booking created successfully. Waiting for vendor approval.",
-      data: newBooking,
-    });
   } catch (error) {
-    console.error("Booking creation error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to create booking",
-      error: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    console.error("❌ Error creating booking:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Internal server error while creating booking",
+      error: error.message 
     });
   }
 });
 
 // FIXED: GET user's bookings - Update this in your index.js
-app.get("/api/bookings/user/", verifyToken, async (req, res) => {
+app.get("/api/bookings/user", verifyToken, async (req, res) => {
   try {
-    // FIX: Get user from MongoDB first
-    const user = await usersCollection.findOne({ email: req.tokenEmail });
+    // 1. Get the email directly from the verified token
+    const buyerEmail = req.tokenEmail;
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
+    console.log("🔍 Fetching bookings for buyer:", buyerEmail);
 
-    // Get bookings using MongoDB user ID
+    // 2. Query by userEmail (which we just added to the POST route)
+    // We also check for 'userId' as a fallback just in case old data exists
     const bookings = await bookingCollection
-      .find({ userId: user._id.toString() })
+      .find({
+        $or: [
+          { userEmail: buyerEmail },
+          { customerEmail: buyerEmail }, // Some stripe setups use this field
+        ],
+      })
       .sort({ createdAt: -1 })
       .toArray();
+
+    console.log(`✅ Found ${bookings.length} bookings for user`);
 
     res.json({
       success: true,
       data: bookings,
     });
   } catch (error) {
-    console.error("Get bookings error:", error);
+    console.error("❌ Get user bookings error:", error);
     res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 });
+// GET bookings for the authenticated vendor (convenience endpoint)
+app.get("/api/bookings/vendor/me", verifyToken, async (req, res) => {
+  try {
+    const vendorEmail = req.tokenEmail;
 
+    // 1. Find all tickets that belong to you
+    const myTickets = await ticketsCollection
+      .find({ vendorEmail: vendorEmail })
+      .project({ _id: 1 })
+      .toArray();
+
+    // 2. Extract the IDs as strings and ObjectIds (for safety)
+    const myTicketIds = myTickets.map((t) => t._id.toString());
+
+    // 3. Find bookings that match your ticket IDs
+    // This works even if the booking document doesn't have 'vendorEmail'
+    const bookings = await bookingCollection
+      .find({
+        $or: [
+          { ticketId: { $in: myTicketIds } },
+          { vendorEmail: vendorEmail }, // Keep this for future-proofing
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: bookings });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 // GET bookings for vendor's tickets
 app.get("/api/bookings/vendor/:vendorId", verifyToken, async (req, res) => {
   try {
@@ -1243,81 +1251,39 @@ app.get("/api/bookings/vendor/:vendorId", verifyToken, async (req, res) => {
   }
 });
 
-// GET bookings for the authenticated vendor (convenience endpoint)
-app.get("/api/bookings/vendor/me", verifyToken, async (req, res) => {
+// PUT update booking status
+app.put("/api/bookings/:id/status", verifyToken, async (req, res) => {
   try {
-    const authUser = await usersCollection.findOne({ email: req.tokenEmail });
-    if (!authUser) {
-      console.warn(
-        `/api/bookings/vendor/me - User not found for email: ${req.tokenEmail}`
-      );
-      // Instead of 404, return empty bookings list to avoid breaking vendor UI
-      return res.json({
-        success: true,
-        data: [],
-        message:
-          "User record not found in DB. Your account may not be synced yet. Please re-login or try again.",
+    const { id } = req.params;
+    const { status } = req.body;
+
+    // Use updateOne instead of findOneAndUpdate to avoid "result.value" confusion
+    const result = await bookingCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
       });
     }
 
-    const vendorTickets = await ticketsCollection
-      .find({ vendorId: authUser._id.toString() })
-      .project({ _id: 1 })
-      .toArray();
-
-    const ticketIds = vendorTickets.map((t) => t._id.toString());
-
-    const bookings = await bookingCollection
-      .find({ ticketId: { $in: ticketIds } })
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.json({ success: true, data: bookings });
+    res.json({
+      success: true,
+      message: `Booking ${status} successfully`,
+    });
   } catch (error) {
+    console.error("Error updating booking:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
-
-// PUT update booking status
-app.put(
-  "/api/bookings/:id/status",
-  verifyToken,
-
-  async (req, res) => {
-    try {
-      const { status } = req.body;
-
-      const result = await bookingCollection.findOneAndUpdate(
-        { _id: new ObjectId(req.params.id) },
-        {
-          $set: {
-            status,
-            updatedAt: new Date(),
-          },
-        },
-        { returnDocument: "after" }
-      );
-
-      if (!result.value) {
-        return res.status(404).json({
-          success: false,
-          message: "Booking not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        message: `Booking ${status} successfully`,
-        data: result.value,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-);
 
 // ============================================
 // STRIPE PAYMENT ROUTES
