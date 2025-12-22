@@ -17,12 +17,12 @@ const admin = require("firebase-admin");
 const serviceAccountKey = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 const serviceAccount = require(serviceAccountKey);
 
-admin.initializeApp({
-  
-  credential: admin.credential.cert(serviceAccount),
-  
-},
-console.log("✅ Firebase Admin Initialized"),);
+admin.initializeApp(
+  {
+    credential: admin.credential.cert(serviceAccount),
+  },
+  console.log("✅ Firebase Admin Initialized")
+);
 
 // JWT VERIFICATION MIDDLEWARE
 const verifyToken = async (req, res, next) => {
@@ -56,7 +56,11 @@ if (process.env.STRIPE_SECRET_KEY) {
 // ============================================
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:5174","http://localhost:3000"],
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "http://localhost:3000",
+    ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -70,6 +74,12 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
+});
+
+// Simple health check route for debugging proxy/connectivity issues
+app.get("/api/health", (req, res) => {
+  console.log("🔔 /api/health ping");
+  res.json({ success: true, status: "ok", time: new Date().toISOString() });
 });
 
 // ============================================
@@ -98,7 +108,6 @@ async function connectDB() {
     console.log("✅ MongoDB Connected Successfully");
 
     db = client.db("MavenusDB");
-    
 
     // In connectDB() function, add:
     roleRequestsCollection = db.collection("roleRequests");
@@ -110,6 +119,8 @@ async function connectDB() {
     // Create indexes
     await ticketsCollection.createIndex({ status: 1, isAdvertised: 1 });
     await ticketsCollection.createIndex({ vendorId: 1 });
+    // Added index to make vendorEmail queries fast and reliable
+    await ticketsCollection.createIndex({ vendorEmail: 1 });
     await ticketsCollection.createIndex({ from: 1, to: 1 });
     await bookingCollection.createIndex({ userId: 1 });
     await bookingCollection.createIndex({ ticketId: 1 });
@@ -128,7 +139,7 @@ async function connectDB() {
 app.get("/api/auth/me", verifyToken, async (req, res) => {
   try {
     console.log("🔍 /api/auth/me - Email from token:", req.tokenEmail); // Debug
-    
+
     const user = await usersCollection.findOne({ email: req.tokenEmail });
 
     if (!user) {
@@ -139,7 +150,12 @@ app.get("/api/auth/me", verifyToken, async (req, res) => {
       });
     }
 
-    console.log("✅ /api/auth/me - User found:", user.email, "Role:", user.role); // Debug
+    console.log(
+      "✅ /api/auth/me - User found:",
+      user.email,
+      "Role:",
+      user.role
+    ); // Debug
 
     res.json({
       success: true,
@@ -161,8 +177,24 @@ app.get("/api/auth/me", verifyToken, async (req, res) => {
   }
 });
 
+// DEBUG: echo token info and resolved user - use only for local debugging
+app.get("/api/debug/me", verifyToken, async (req, res) => {
+  try {
+    console.log("🔍 /api/debug/me - tokenEmail:", req.tokenEmail);
+    const user = await usersCollection.findOne({ email: req.tokenEmail });
+    return res.json({
+      success: true,
+      tokenEmail: req.tokenEmail,
+      user: user || null,
+    });
+  } catch (err) {
+    console.error("/api/debug/me error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ✅ FIX 2: User registration/login route (ENSURE ROLE IS SAVED)
-app.post("/user", async (req, res) => {
+app.post("/api/user", async (req, res) => {
   try {
     const userData = req.body;
     console.log("🔍 /user - Received data:", userData.email); // Debug
@@ -171,43 +203,50 @@ app.post("/user", async (req, res) => {
     if (userData.password) {
       const p = userData.password;
       const pwdErrors = [];
-      if (typeof p !== "string" || p.length < 6) pwdErrors.push("Password must be at least 6 characters long.");
-      if (!/[A-Z]/.test(p)) pwdErrors.push("Password must contain at least one uppercase letter.");
-      if (!/[a-z]/.test(p)) pwdErrors.push("Password must contain at least one lowercase letter.");
+      if (typeof p !== "string" || p.length < 6)
+        pwdErrors.push("Password must be at least 6 characters long.");
+      if (!/[A-Z]/.test(p))
+        pwdErrors.push("Password must contain at least one uppercase letter.");
+      if (!/[a-z]/.test(p))
+        pwdErrors.push("Password must contain at least one lowercase letter.");
       if (pwdErrors.length > 0) {
-        return res.status(400).json({ success: false, message: pwdErrors.join(" ") });
+        return res
+          .status(400)
+          .json({ success: false, message: pwdErrors.join(" ") });
       }
     }
 
     const query = { email: userData.email };
-    
+
     // Check if user exists
     const existingUser = await usersCollection.findOne(query);
-    
+
     if (existingUser) {
-      console.log("✅ /user - Existing user found:", existingUser.email, "Role:", existingUser.role); // Debug
-      
+      console.log(
+        "✅ /user - Existing user found:",
+        existingUser.email,
+        "Role:",
+        existingUser.role
+      ); // Debug
+
       // User exists - ONLY update last login and profile data, DON'T CHANGE ROLE
-      await usersCollection.updateOne(
-        query,
-        {
-          $set: {
-            last_loggedIn: new Date().toISOString(),
-            photoURL: userData.photoURL || existingUser.photoURL,
-            displayName: userData.displayName || existingUser.displayName
-          }
-        }
-      );
-      
+      await usersCollection.updateOne(query, {
+        $set: {
+          last_loggedIn: new Date().toISOString(),
+          photoURL: userData.photoURL || existingUser.photoURL,
+          displayName: userData.displayName || existingUser.displayName,
+        },
+      });
+
       // Fetch updated user
       const updatedUser = await usersCollection.findOne(query);
-      
+
       return res.send({
         message: "User logged in",
         user: updatedUser,
       });
     }
-    
+
     // New user - create with "user" role
     const newUser = {
       email: userData.email,
@@ -219,45 +258,59 @@ app.post("/user", async (req, res) => {
       created_at: new Date().toISOString(),
       last_loggedIn: new Date().toISOString(),
     };
-    
+
     const result = await usersCollection.insertOne(newUser);
-    
-    console.log("✅ /user - New user created:", newUser.email, "Role:", newUser.role); // Debug
-    
+
+    console.log(
+      "✅ /user - New user created:",
+      newUser.email,
+      "Role:",
+      newUser.role
+    ); // Debug
+
     res.send({
       message: "User created",
       user: newUser,
     });
   } catch (err) {
     console.error("❌ /user - Error:", err); // Debug
-    res.status(500).send({ 
+    res.status(500).send({
       error: "Server error during user save/update",
-      details: err.message 
+      details: err.message,
     });
   }
 });
 
 // Password validation endpoint - validates the password rules (length, uppercase, lowercase)
-app.post("/validate-password", async (req, res) => {
+app.post("/api/validate-password", async (req, res) => {
   try {
     const { password } = req.body || {};
     if (!password || typeof password !== "string") {
-      return res.status(400).json({ success: false, message: "Password is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Password is required" });
     }
 
     const errors = [];
-    if (password.length < 6) errors.push("Password must be at least 6 characters long.");
-    if (!/[A-Z]/.test(password)) errors.push("Password must contain at least one uppercase letter.");
-    if (!/[a-z]/.test(password)) errors.push("Password must contain at least one lowercase letter.");
+    if (password.length < 6)
+      errors.push("Password must be at least 6 characters long.");
+    if (!/[A-Z]/.test(password))
+      errors.push("Password must contain at least one uppercase letter.");
+    if (!/[a-z]/.test(password))
+      errors.push("Password must contain at least one lowercase letter.");
 
     if (errors.length > 0) {
-      return res.status(400).json({ success: false, message: errors.join(" ") });
+      return res
+        .status(400)
+        .json({ success: false, message: errors.join(" ") });
     }
 
     return res.json({ success: true, message: "Password is valid" });
   } catch (err) {
     console.error("/validate-password error:", err);
-    return res.status(500).json({ success: false, message: "Server error validating password" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error validating password" });
   }
 });
 
@@ -297,409 +350,570 @@ app.post("/validate-password", async (req, res) => {
 //   }
 // });
 
-    // get a user's role
-    app.get("/user/role", verifyToken, async (req, res) => {
-      const result = await usersCollection.findOne({ email: req.tokenEmail });
-      res.send({ role: result?.role });
+// get a user's role
+app.get("/api/user/role", verifyToken, async (req, res) => {
+  const result = await usersCollection.findOne({ email: req.tokenEmail });
+  res.send({ role: result?.role });
+});
+// ============================================
+// TICKET ROUTES (PROTECTED)
+// ============================================
+
+// GET all approved tickets
+app.get("/api/tickets", async (req, res) => {
+  try {
+    const { from, to, transportType, sortBy, page = 1, limit = 9 } = req.query;
+
+    let query = { status: "approved" };
+
+    if (from) query.from = { $regex: from, $options: "i" };
+    if (to) query.to = { $regex: to, $options: "i" };
+    if (transportType) query.transportType = transportType;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    let sort = {};
+    if (sortBy === "price-asc") sort.price = 1;
+    if (sortBy === "price-desc") sort.price = -1;
+    if (!sortBy) sort.createdAt = -1;
+
+    const tickets = await ticketsCollection
+      .find(query)
+      .sort(sort)
+      .skip(skip)
+      .limit(parseInt(limit))
+      .toArray();
+
+    const total = await ticketsCollection.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: tickets,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit)),
+      },
     });
-    // ============================================
-    // TICKET ROUTES (PROTECTED)
-    // ============================================
-
-    // GET all approved tickets
-    app.get("/api/tickets", async (req, res) => {
-      try {
-        const {
-          from,
-          to,
-          transportType,
-          sortBy,
-          page = 1,
-          limit = 9,
-        } = req.query;
-
-        let query = { status: "approved" };
-
-        if (from) query.from = { $regex: from, $options: "i" };
-        if (to) query.to = { $regex: to, $options: "i" };
-        if (transportType) query.transportType = transportType;
-
-        const skip = (parseInt(page) - 1) * parseInt(limit);
-
-        let sort = {};
-        if (sortBy === "price-asc") sort.price = 1;
-        if (sortBy === "price-desc") sort.price = -1;
-        if (!sortBy) sort.createdAt = -1;
-
-        const tickets = await ticketsCollection
-          .find(query)
-          .sort(sort)
-          .skip(skip)
-          .limit(parseInt(limit))
-          .toArray();
-
-        const total = await ticketsCollection.countDocuments(query);
-
-        res.json({
-          success: true,
-          data: tickets,
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
-            total,
-            pages: Math.ceil(total / parseInt(limit)),
-          },
-        });
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
     });
+  }
+});
 
-    // GET single ticket
-    app.get("/api/tickets/:id", verifyToken, async (req, res) => {
-      try {
-        const ticket = await ticketsCollection.findOne({
-          _id: new ObjectId(req.params.id),
-        });
-
-        if (!ticket) {
-          return res.status(404).json({
-            success: false,
-            message: "Ticket not found",
-          });
-        }
-
-        res.json({ success: true, data: ticket });
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
+// GET single ticket
+app.get("/api/tickets/:id", verifyToken, async (req, res) => {
+  try {
+    const ticket = await ticketsCollection.findOne({
+      _id: new ObjectId(req.params.id),
     });
 
-    // GET latest tickets
-    app.get("/api/tickets/latest/all", async (req, res) => {
-      try {
-        const tickets = await ticketsCollection
-          .find({ status: "approved" })
-          .sort({ createdAt: -1 })
-          .limit(8)
-          .toArray();
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: "Ticket not found",
+      });
+    }
 
-        res.json({ success: true, data: tickets });
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
+    res.json({ success: true, data: ticket });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// GET latest tickets
+app.get("/api/tickets/latest/all", async (req, res) => {
+  try {
+    const tickets = await ticketsCollection
+      .find({ status: "approved" })
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .toArray();
+
+    res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// GET advertised tickets
+app.get("/api/tickets/advertised/all", async (req, res) => {
+  try {
+    const tickets = await ticketsCollection
+      .find({
+        status: "approved",
+        isAdvertised: true,
+      })
+      .limit(6)
+      .toArray();
+
+    res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// GET vendor's tickets
+app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
+  try {
+    const tickets = await ticketsCollection
+      .find({ vendorId: req.params.vendorId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// ============================================
+// FIXED: GET /api/tickets/vendor/me
+// Replace this endpoint in your index.js
+// ============================================
+
+app.get("/api/tickets/vendor/me", verifyToken, async (req, res) => {
+  try {
+    const vendorEmail = req.tokenEmail;
+
+    console.log("🎫 GET /api/tickets/vendor/me - Vendor:", vendorEmail);
+
+    // Resolve vendor document to enable matching by vendorId as either string or ObjectId
+    const vendor = await usersCollection.findOne({ email: vendorEmail });
+
+    // Create a case-insensitive regex and be tolerant of surrounding whitespace
+    const escapedEmail = vendorEmail.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+    const emailRegex = new RegExp(`^\\s*${escapedEmail}\\s*$`, "i");
+
+    // Build $or conditions including:
+    // - vendorId as string
+    // - vendorId as ObjectId (if vendor exists)
+    // - vendorEmail (case-insensitive)
+    const orConditions = [{ vendorEmail: emailRegex }];
+    if (vendor) {
+      orConditions.unshift({ vendorId: vendor._id.toString() });
+      orConditions.unshift({ vendorId: vendor._id });
+    }
+
+    const query = { $or: orConditions };
+
+    // Diagnostic counts to help identify mismatches in stored documents
+    const countByVendorIdStr = vendor
+      ? await ticketsCollection.countDocuments({
+          vendorId: vendor._id.toString(),
+        })
+      : 0;
+    const countByVendorIdObj = vendor
+      ? await ticketsCollection.countDocuments({ vendorId: vendor._id })
+      : 0;
+    const countByEmail = await ticketsCollection.countDocuments({
+      vendorEmail: emailRegex,
     });
 
-    // GET advertised tickets
-    app.get("/api/tickets/advertised/all", async (req, res) => {
-      try {
-        const tickets = await ticketsCollection
-          .find({
-            status: "approved",
-            isAdvertised: true,
+    console.log(
+      `/api/tickets/vendor/me - counts idStr:${countByVendorIdStr}, idObj:${countByVendorIdObj}, email:${countByEmail}`
+    );
+
+    const tickets = await ticketsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    console.log(`📊 Found ${tickets.length} tickets using query:`, query);
+
+    // Prevent caching so clients always get fresh results (avoid 304 Not Modified)
+    res.set(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate"
+    );
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+
+    res.json({
+      success: true,
+      data: tickets,
+    });
+  } catch (error) {
+    console.error("❌ Error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      data: [],
+    });
+  }
+});
+
+// DEBUG: Vendor ticket diagnostics (protected)
+app.get("/api/debug/vendor-tickets", verifyToken, async (req, res) => {
+  try {
+    const vendorEmail = req.tokenEmail;
+    console.log("🔎 /api/debug/vendor-tickets - Vendor:", vendorEmail);
+
+    const vendor = await usersCollection.findOne({ email: vendorEmail });
+
+    const escapedEmail = vendorEmail.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+    const emailRegex = new RegExp(`^\\s*${escapedEmail}\\s*$`, "i");
+
+    const orConditions = [{ vendorEmail: emailRegex }];
+    if (vendor) {
+      orConditions.unshift({ vendorId: vendor._id.toString() });
+      orConditions.unshift({ vendorId: vendor._id });
+    }
+
+    const query = { $or: orConditions };
+
+    const counts = {
+      idStr: vendor
+        ? await ticketsCollection.countDocuments({
+            vendorId: vendor._id.toString(),
           })
-          .limit(6)
-          .toArray();
+        : 0,
+      idObj: vendor
+        ? await ticketsCollection.countDocuments({ vendorId: vendor._id })
+        : 0,
+      email: await ticketsCollection.countDocuments({
+        vendorEmail: emailRegex,
+      }),
+    };
 
-        res.json({ success: true, data: tickets });
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
-    });
+    const samples = await ticketsCollection.find(query).limit(5).toArray();
 
-    // GET vendor's tickets
-    app.get("/api/tickets/vendor/:vendorId", verifyToken, async (req, res) => {
-      try {
-        const tickets = await ticketsCollection
-          .find({ vendorId: req.params.vendorId })
-          .sort({ createdAt: -1 })
-          .toArray();
-
-        res.json({ success: true, data: tickets });
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
-    });
-
-    // POST create ticket (vendor only)
-    app.post(
-      "/api/tickets",
-      verifyToken,
-     
-      async (req, res) => {
-        try {
-          // Check if vendor is marked as fraud
-          const vendor = await usersCollection.findOne({ uid: req.user.uid });
-
-          if (vendor.isFraud) {
-            return res.status(403).json({
-              success: false,
-              message: "Your account has been flagged. Cannot add tickets.",
-            });
-          }
-
-          const ticketData = {
-            ...req.body,
-            vendorId: req.user.userId,
-            status: "pending",
-            isAdvertised: false,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          };
-
-          const result = await ticketsCollection.insertOne(ticketData);
-          const newTicket = await ticketsCollection.findOne({
-            _id: result.insertedId,
-          });
-
-          res.status(201).json({
-            success: true,
-            message: "Ticket added successfully. Waiting for admin approval.",
-            data: newTicket,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
-      }
+    console.log(
+      "🔎 /api/debug/vendor-tickets - counts:",
+      counts,
+      "samples:",
+      samples.length
     );
 
-    // PUT update ticket
-    app.put(
-      "/api/tickets/:id",
-      verifyToken,
-     
-      async (req, res) => {
-        try {
-          const updateData = {
-            ...req.body,
-            updatedAt: new Date(),
-          };
+    return res.json({ success: true, counts, samples });
+  } catch (err) {
+    console.error("🔎 /api/debug/vendor-tickets - error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
-          const result = await ticketsCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.id) },
-            { $set: updateData },
-            { returnDocument: "after" }
-          );
+// POST create ticket (vendor only)
+app.post(
+  "/api/tickets",
+  verifyToken,
 
-          if (!result.value) {
-            return res.status(404).json({
-              success: false,
-              message: "Ticket not found",
-            });
-          }
+  async (req, res) => {
+    try {
+      // Resolve vendor by token email
+      const vendor = await usersCollection.findOne({ email: req.tokenEmail });
 
-          res.json({
-            success: true,
-            message: "Ticket updated successfully",
-            data: result.value,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      if (!vendor) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Vendor not found" });
       }
-    );
 
-    // DELETE ticket
-    app.delete(
-      "/api/tickets/:id",
-      verifyToken,
-      
-      async (req, res) => {
-        try {
-          const result = await ticketsCollection.deleteOne({
-            _id: new ObjectId(req.params.id),
-          });
-
-          if (result.deletedCount === 0) {
-            return res.status(404).json({
-              success: false,
-              message: "Ticket not found",
-            });
-          }
-
-          res.json({
-            success: true,
-            message: "Ticket deleted successfully",
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
-      }
-    );
-
-    // Role Request handling 
-    app.post("/api/role-requests", verifyToken, async (req, res) => {
-      try {
-        const { requestedRole } = req.body;
-
-        // Validate requested role
-        if (!["vendor", "admin"].includes(requestedRole)) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid role. Can only request: vendor or admin",
-          });
-        }
-
-        // Get current user
-        const user = await usersCollection.findOne({ email: req.tokenEmail });
-
-        if (!user) {
-          return res.status(404).json({
-            success: false,
-            message: "User not found",
-          });
-        }
-
-        // Check if user already has this role or higher
-        if (user.role === requestedRole) {
-          return res.status(400).json({
-            success: false,
-            message: `You are already a ${requestedRole}`,
-          });
-        }
-
-        if (user.role === "admin") {
-          return res.status(400).json({
-            success: false,
-            message: "You already have admin privileges",
-          });
-        }
-
-        // Check for existing pending request
-        const existingRequest = await roleRequestsCollection.findOne({
-          userEmail: req.tokenEmail,
-          status: "pending",
-        });
-
-        if (existingRequest) {
-          return res.status(400).json({
-            success: false,
-            message: "You already have a pending request",
-          });
-        }
-
-        // Create role request
-        const roleRequest = {
-          userId: user._id.toString(),
-          userEmail: user.email,
-          userName: user.displayName || "User",
-          userPhoto: user.photoURL || null,
-          currentRole: user.role,
-          requestedRole: requestedRole,
-          status: "pending", // pending, approved, rejected
-          requestDate: new Date().toISOString(),
-          processedBy: null,
-          processedDate: null,
-          rejectionReason: null,
-        };
-
-        const result = await roleRequestsCollection.insertOne(roleRequest);
-        const newRequest = await roleRequestsCollection.findOne({
-          _id: result.insertedId,
-        });
-
-        console.log("✅ Role request created:", newRequest);
-
-        res.status(201).json({
-          success: true,
-          message: `${requestedRole} request submitted successfully`,
-          data: newRequest,
-        });
-      } catch (error) {
-        console.error("Error creating role request:", error);
-        res.status(500).json({
+      if (vendor.isFraud) {
+        return res.status(403).json({
           success: false,
-          message: error.message,
+          message: "Your account has been flagged. Cannot add tickets.",
         });
       }
+
+      const ticketData = {
+        ...req.body,
+        vendorId: vendor._id.toString(),
+        vendorName: vendor.displayName || vendor.name || "Vendor",
+        vendorEmail: vendor.email,
+        status: "pending",
+        isAdvertised: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      const result = await ticketsCollection.insertOne(ticketData);
+      const rawTicket = await ticketsCollection.findOne({
+        _id: result.insertedId,
+      });
+      // Convert _id to string for consistent client handling
+      const newTicket = { ...rawTicket, _id: rawTicket._id.toString() };
+
+      console.log(
+        "/api/tickets - Ticket created by:",
+        vendor.email,
+        "vendorId:",
+        vendor._id.toString(),
+        "insertedId:",
+        result.insertedId
+      );
+
+      // Diagnostic checks after insert
+      const foundByVendorId = await ticketsCollection
+        .find({ vendorId: vendor._id.toString() })
+        .toArray();
+      const foundByVendorEmail = await ticketsCollection
+        .find({ vendorEmail: vendor.email })
+        .toArray();
+      console.log(
+        "/api/tickets - post-insert diagnostic: byVendorIdCount:",
+        foundByVendorId.length,
+        "byVendorEmailCount:",
+        foundByVendorEmail.length,
+        "newTicketStored:",
+        rawTicket
+      );
+
+      // Prevent caching responses for newly created resources
+      res.set(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate, proxy-revalidate"
+      );
+      res.set("Pragma", "no-cache");
+      res.set("Expires", "0");
+
+      res.status(201).json({
+        success: true,
+        message: "Ticket added successfully. Waiting for admin approval.",
+        data: newTicket,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+);
+
+// PUT update ticket
+app.put(
+  "/api/tickets/:id",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const updateData = {
+        ...req.body,
+        updatedAt: new Date(),
+      };
+
+      const result = await ticketsCollection.findOneAndUpdate(
+        { _id: new ObjectId(req.params.id) },
+        { $set: updateData },
+        { returnDocument: "after" }
+      );
+
+      if (!result.value) {
+        return res.status(404).json({
+          success: false,
+          message: "Ticket not found",
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Ticket updated successfully",
+        data: result.value,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+);
+
+// DELETE ticket
+app.delete(
+  "/api/tickets/:id",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const result = await ticketsCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Ticket not found",
+        });
+      }
+
+      res.json({
+        success: true,
+        message: "Ticket deleted successfully",
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+);
+
+// Role Request handling
+app.post("/api/role-requests", verifyToken, async (req, res) => {
+  try {
+    const { requestedRole } = req.body;
+
+    // Validate requested role
+    if (!["vendor", "admin"].includes(requestedRole)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid role. Can only request: vendor or admin",
+      });
+    }
+
+    // Get current user
+    const user = await usersCollection.findOne({ email: req.tokenEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Check if user already has this role or higher
+    if (user.role === requestedRole) {
+      return res.status(400).json({
+        success: false,
+        message: `You are already a ${requestedRole}`,
+      });
+    }
+
+    if (user.role === "admin") {
+      return res.status(400).json({
+        success: false,
+        message: "You already have admin privileges",
+      });
+    }
+
+    // Check for existing pending request
+    const existingRequest = await roleRequestsCollection.findOne({
+      userEmail: req.tokenEmail,
+      status: "pending",
     });
 
-    // GET: Get user's own role requests
-    app.get("/api/role-requests/my-requests", verifyToken, async (req, res) => {
-      try {
-        const requests = await roleRequestsCollection
-          .find({ userEmail: req.tokenEmail })
-          .sort({ requestDate: -1 })
-          .toArray();
+    if (existingRequest) {
+      return res.status(400).json({
+        success: false,
+        message: "You already have a pending request",
+      });
+    }
 
-        res.json({
-          success: true,
-          data: requests,
-        });
-      } catch (error) {
-        console.error("Error fetching requests:", error);
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
+    // Create role request
+    const roleRequest = {
+      userId: user._id.toString(),
+      userEmail: user.email,
+      userName: user.displayName || "User",
+      userPhoto: user.photoURL || null,
+      currentRole: user.role,
+      requestedRole: requestedRole,
+      status: "pending", // pending, approved, rejected
+      requestDate: new Date().toISOString(),
+      processedBy: null,
+      processedDate: null,
+      rejectionReason: null,
+    };
+
+    const result = await roleRequestsCollection.insertOne(roleRequest);
+    const newRequest = await roleRequestsCollection.findOne({
+      _id: result.insertedId,
     });
 
-    // GET: Get all pending role requests (Admin only)
-    app.get("/api/admin/role-requests", verifyToken, async (req, res) => {
-      try {
-        // Verify user is admin
-        const adminUser = await usersCollection.findOne({
-          email: req.tokenEmail,
-        });
+    console.log("✅ Role request created:", newRequest);
 
-        if (adminUser.role !== "admin") {
-          return res.status(403).json({
-            success: false,
-            message: "Only admins can access this endpoint",
-          });
-        }
+    res.status(201).json({
+      success: true,
+      message: `${requestedRole} request submitted successfully`,
+      data: newRequest,
+    });
+  } catch (error) {
+    console.error("Error creating role request:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
 
-        const { status } = req.query;
+// GET: Get user's own role requests
+app.get("/api/role-requests/my-requests", verifyToken, async (req, res) => {
+  try {
+    const requests = await roleRequestsCollection
+      .find({ userEmail: req.tokenEmail })
+      .sort({ requestDate: -1 })
+      .toArray();
 
-        let query = {};
-        if (status && ["pending", "approved", "rejected"].includes(status)) {
-          query.status = status;
-        }
+    res.json({
+      success: true,
+      data: requests,
+    });
+  } catch (error) {
+    console.error("Error fetching requests:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
 
-        const requests = await roleRequestsCollection
-          .find(query)
-          .sort({ requestDate: -1 })
-          .toArray();
-
-        res.json({
-          success: true,
-          data: requests,
-        });
-      } catch (error) {
-        console.error("Error fetching role requests:", error);
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
+// GET: Get all pending role requests (Admin only)
+app.get("/api/admin/role-requests", verifyToken, async (req, res) => {
+  try {
+    // Verify user is admin
+    const adminUser = await usersCollection.findOne({
+      email: req.tokenEmail,
     });
 
-    // ============================================
+    if (adminUser.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only admins can access this endpoint",
+      });
+    }
+
+    const { status } = req.query;
+
+    let query = {};
+    if (status && ["pending", "approved", "rejected"].includes(status)) {
+      query.status = status;
+    }
+
+    const requests = await roleRequestsCollection
+      .find(query)
+      .sort({ requestDate: -1 })
+      .toArray();
+
+    res.json({
+      success: true,
+      data: requests,
+    });
+  } catch (error) {
+    console.error("Error fetching role requests:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// ============================================
 // FIXED: PUT /api/admin/role-requests/:requestId
 // Replace this in your index.js
 // ============================================
@@ -711,7 +925,12 @@ app.put(
     try {
       const { action, rejectionReason } = req.body; // "approve" or "reject"
 
-      console.log("🔍 Processing request:", req.params.requestId, "Action:", action);
+      console.log(
+        "🔍 Processing request:",
+        req.params.requestId,
+        "Action:",
+        action
+      );
 
       // Verify user is admin
       const adminUser = await usersCollection.findOne({
@@ -751,13 +970,18 @@ app.put(
         });
       }
 
-      console.log("✅ Request found:", request.userEmail, "→", request.requestedRole);
+      console.log(
+        "✅ Request found:",
+        request.userEmail,
+        "→",
+        request.requestedRole
+      );
 
       // If approving, update user's role
       if (action === "approve") {
         // ✅ FIX: Use email to find user, not _id
-        const userToUpdate = await usersCollection.findOne({ 
-          email: request.userEmail 
+        const userToUpdate = await usersCollection.findOne({
+          email: request.userEmail,
         });
 
         console.log("🔍 Looking for user:", request.userEmail);
@@ -770,7 +994,12 @@ app.put(
           });
         }
 
-        console.log("✅ User found:", userToUpdate.email, "Current role:", userToUpdate.role);
+        console.log(
+          "✅ User found:",
+          userToUpdate.email,
+          "Current role:",
+          userToUpdate.role
+        );
 
         // Update the user's role
         const updateResult = await usersCollection.findOneAndUpdate(
@@ -828,54 +1057,50 @@ app.put(
   }
 );
 
-    // DELETE: Cancel own pending request
-    app.delete(
-      "/api/role-requests/:requestId",
-      verifyToken,
-      async (req, res) => {
-        try {
-          const request = await roleRequestsCollection.findOne({
-            _id: new ObjectId(req.params.requestId),
-            userEmail: req.tokenEmail,
-          });
+// DELETE: Cancel own pending request
+app.delete("/api/role-requests/:requestId", verifyToken, async (req, res) => {
+  try {
+    const request = await roleRequestsCollection.findOne({
+      _id: new ObjectId(req.params.requestId),
+      userEmail: req.tokenEmail,
+    });
 
-          if (!request) {
-            return res.status(404).json({
-              success: false,
-              message: "Request not found",
-            });
-          }
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: "Request not found",
+      });
+    }
 
-          if (request.status !== "pending") {
-            return res.status(400).json({
-              success: false,
-              message: "Can only cancel pending requests",
-            });
-          }
+    if (request.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Can only cancel pending requests",
+      });
+    }
 
-          await roleRequestsCollection.deleteOne({
-            _id: new ObjectId(req.params.requestId),
-          });
+    await roleRequestsCollection.deleteOne({
+      _id: new ObjectId(req.params.requestId),
+    });
 
-          res.json({
-            success: true,
-            message: "Request cancelled successfully",
-          });
-        } catch (error) {
-          console.error("Error cancelling request:", error);
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
-      }
-    );
+    res.json({
+      success: true,
+      message: "Request cancelled successfully",
+    });
+  } catch (error) {
+    console.error("Error cancelling request:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
 
-    // ============================================
-    // BOOKING ROUTES (PROTECTED)
-    // ============================================
+// ============================================
+// BOOKING ROUTES (PROTECTED)
+// ============================================
 
-    // POST create booking
+// POST create booking
 // FIXED: POST create booking - Update this in your index.js
 // FIXED: POST create booking - Update this in your index.js
 app.post("/api/bookings", verifyToken, async (req, res) => {
@@ -962,7 +1187,7 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
   }
 });
 
-    // FIXED: GET user's bookings - Update this in your index.js
+// FIXED: GET user's bookings - Update this in your index.js
 app.get("/api/bookings/user/", verifyToken, async (req, res) => {
   try {
     // FIX: Get user from MongoDB first
@@ -981,9 +1206,9 @@ app.get("/api/bookings/user/", verifyToken, async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.json({ 
-      success: true, 
-      data: bookings 
+    res.json({
+      success: true,
+      data: bookings,
     });
   } catch (error) {
     console.error("Get bookings error:", error);
@@ -994,445 +1219,818 @@ app.get("/api/bookings/user/", verifyToken, async (req, res) => {
   }
 });
 
-    // GET bookings for vendor's tickets
-    app.get(
-      "/api/bookings/vendor/:vendorId",
-      verifyToken,
-      async (req, res) => {
-        try {
-          const vendorTickets = await ticketsCollection
-            .find({ vendorId: req.params.vendorId })
-            .project({ _id: 1 })
-            .toArray();
+// GET bookings for vendor's tickets
+app.get("/api/bookings/vendor/:vendorId", verifyToken, async (req, res) => {
+  try {
+    const vendorTickets = await ticketsCollection
+      .find({ vendorId: req.params.vendorId })
+      .project({ _id: 1 })
+      .toArray();
 
-          const ticketIds = vendorTickets.map((t) => t._id.toString());
+    const ticketIds = vendorTickets.map((t) => t._id.toString());
 
-          const bookings = await bookingCollection
-            .find({ ticketId: { $in: ticketIds } })
-            .sort({ createdAt: -1 })
-            .toArray();
+    const bookings = await bookingCollection
+      .find({ ticketId: { $in: ticketIds } })
+      .sort({ createdAt: -1 })
+      .toArray();
 
-          res.json({ success: true, data: bookings });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+    res.json({ success: true, data: bookings });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// GET bookings for the authenticated vendor (convenience endpoint)
+app.get("/api/bookings/vendor/me", verifyToken, async (req, res) => {
+  try {
+    const authUser = await usersCollection.findOne({ email: req.tokenEmail });
+    if (!authUser) {
+      console.warn(
+        `/api/bookings/vendor/me - User not found for email: ${req.tokenEmail}`
+      );
+      // Instead of 404, return empty bookings list to avoid breaking vendor UI
+      return res.json({
+        success: true,
+        data: [],
+        message:
+          "User record not found in DB. Your account may not be synced yet. Please re-login or try again.",
+      });
+    }
+
+    const vendorTickets = await ticketsCollection
+      .find({ vendorId: authUser._id.toString() })
+      .project({ _id: 1 })
+      .toArray();
+
+    const ticketIds = vendorTickets.map((t) => t._id.toString());
+
+    const bookings = await bookingCollection
+      .find({ ticketId: { $in: ticketIds } })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: bookings });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT update booking status
+app.put(
+  "/api/bookings/:id/status",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const { status } = req.body;
+
+      const result = await bookingCollection.findOneAndUpdate(
+        { _id: new ObjectId(req.params.id) },
+        {
+          $set: {
+            status,
+            updatedAt: new Date(),
+          },
+        },
+        { returnDocument: "after" }
+      );
+
+      if (!result.value) {
+        return res.status(404).json({
+          success: false,
+          message: "Booking not found",
+        });
       }
+
+      res.json({
+        success: true,
+        message: `Booking ${status} successfully`,
+        data: result.value,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+);
+
+// ============================================
+// STRIPE PAYMENT ROUTES
+// ============================================
+
+// Create Stripe checkout session
+app.post("/api/payment/create-session", verifyToken, async (req, res) => {
+  try {
+    const { bookingId } = req.body;
+
+    const booking = await bookingCollection.findOne({
+      _id: new ObjectId(bookingId),
+    });
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    if (booking.status !== "accepted") {
+      return res.status(400).json({
+        success: false,
+        message: "Booking must be accepted by vendor before payment",
+      });
+    }
+
+    // Prevent creating payment session if departure has already passed
+    const departureDateTime = new Date(
+      booking.departureDate + " " + booking.departureTime
     );
+    if (isNaN(departureDateTime.getTime()) || departureDateTime <= new Date()) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Cannot pay for a booking whose departure date/time has already passed",
+      });
+    }
 
-    // PUT update booking status
-    app.put(
-      "/api/bookings/:id/status",
-      verifyToken,
+    // Prevent duplicate payments
+    if (booking.status === "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "Booking is already paid",
+      });
+    }
 
-      async (req, res) => {
-        try {
-          const { status } = req.body;
-
-          const result = await bookingCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.id) },
-            {
-              $set: {
-                status,
-                updatedAt: new Date(),
-              },
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "bdt",
+            product_data: {
+              name: booking.ticketTitle,
+              description: `${booking.from} → ${booking.to}`,
             },
-            { returnDocument: "after" }
-          );
+            unit_amount: Math.round(booking.totalPrice * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/dashboard/user/bookings`,
+      metadata: {
+        bookingId: bookingId,
+        userId: booking.userId,
+      },
+    });
 
-          if (!result.value) {
-            return res.status(404).json({
-              success: false,
-              message: "Booking not found",
-            });
-          }
+    res.json({
+      success: true,
+      sessionId: session.id,
+      url: session.url,
+    });
+  } catch (error) {
+    console.error("Stripe error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
 
-          res.json({
-            success: true,
-            message: `Booking ${status} successfully`,
-            data: result.value,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+// Verify payment and update booking
+app.post("/api/payment/verify", verifyToken, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status === "paid") {
+      const bookingId = session.metadata.bookingId;
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(bookingId),
+      });
+
+      if (!booking) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Booking not found" });
       }
-    );
 
-    // ============================================
-    // STRIPE PAYMENT ROUTES
-    // ============================================
+      // If already processed, return early
+      if (booking.status === "paid") {
+        return res
+          .status(200)
+          .json({ success: true, message: "Payment already processed" });
+      }
 
-    // Create Stripe checkout session
-    app.post("/api/payment/create-session", verifyToken, async (req, res) => {
-      try {
-        const { bookingId } = req.body;
+      // Attempt to atomically decrement ticket quantity only if enough seats are available
+      const ticketUpdate = await ticketsCollection.findOneAndUpdate(
+        {
+          _id: new ObjectId(booking.ticketId),
+          ticketQuantity: { $gte: booking.bookingQuantity },
+        },
+        { $inc: { ticketQuantity: -booking.bookingQuantity } },
+        { returnDocument: "after" }
+      );
 
-        const booking = await bookingCollection.findOne({
-          _id: new ObjectId(bookingId),
+      if (!ticketUpdate.value) {
+        // Insufficient seats: record failed transaction and mark booking for review
+        await transactionsCollection.insertOne({
+          transactionId: session.payment_intent || null,
+          userId: booking.userId,
+          bookingId: bookingId,
+          ticketTitle: booking.ticketTitle,
+          amount: booking.totalPrice,
+          paymentDate: new Date(),
+          paymentMethod: "card",
+          status: "failed",
+          note: "Insufficient tickets to fulfill booking",
+          createdAt: new Date(),
         });
 
-        if (!booking) {
-          return res.status(404).json({
-            success: false,
-            message: "Booking not found",
+        await bookingCollection.updateOne(
+          { _id: new ObjectId(bookingId) },
+          {
+            $set: {
+              status: "payment_failed",
+              transactionId: session.payment_intent || null,
+              paymentDate: new Date(),
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        return res.status(409).json({
+          success: false,
+          message:
+            "Payment completed but not enough tickets are available to fulfill booking. Support will contact you for next steps.",
+        });
+      }
+
+      // Update booking to paid
+      await bookingCollection.updateOne(
+        { _id: new ObjectId(bookingId) },
+        {
+          $set: {
+            status: "paid",
+            transactionId: session.payment_intent,
+            paymentDate: new Date(),
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      // Create transaction record
+      await transactionsCollection.insertOne({
+        transactionId: session.payment_intent,
+        userId: booking.userId,
+        bookingId: bookingId,
+        ticketTitle: booking.ticketTitle,
+        amount: booking.totalPrice,
+        paymentDate: new Date(),
+        paymentMethod: "card",
+        status: "completed",
+        createdAt: new Date(),
+      });
+
+      res.json({
+        success: true,
+        message: "Payment verified successfully",
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: "Payment not completed",
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// GET user's transactions
+app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
+  try {
+    // Ensure authenticated user is requesting their own transactions
+    const authUser = await usersCollection.findOne({ email: req.tokenEmail });
+    if (!authUser) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    if (authUser._id.toString() !== req.params.userId) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: cannot access other user's transactions",
+      });
+    }
+
+    const transactions = await transactionsCollection
+      .find({ userId: req.params.userId })
+      .sort({ paymentDate: -1 })
+      .toArray();
+
+    res.json({ success: true, data: transactions });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// ============================================
+// ADMIN ROUTES (PROTECTED)
+// ============================================
+
+// GET all tickets
+app.get("/api/admin/tickets", verifyToken, async (req, res) => {
+  try {
+    const tickets = await ticketsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// PUT approve/reject ticket
+app.put(
+  "/api/admin/tickets/:id/status",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const { status } = req.body;
+
+      // Diagnostic: normalize and log id param
+      let ticketIdParam = req.params.id;
+      if (typeof ticketIdParam === "object" && ticketIdParam !== null) {
+        ticketIdParam = ticketIdParam.$oid || ticketIdParam.toString();
+      }
+      if (typeof ticketIdParam === "string")
+        ticketIdParam = ticketIdParam.trim();
+      console.log(
+        "🔍 PUT /api/admin/tickets/:id/status - id param:",
+        JSON.stringify(ticketIdParam),
+        "type:",
+        typeof ticketIdParam
+      );
+
+      // Try ObjectId lookup first, then string lookup
+      let ticketDoc = null;
+      try {
+        const docs = await ticketsCollection
+          .find({ _id: new ObjectId(ticketIdParam) })
+          .limit(1)
+          .toArray();
+        console.log("🔎 ObjectId lookup count:", docs.length);
+        ticketDoc = docs[0] || null;
+      } catch (e) {
+        console.log("⚠ Invalid ObjectId or lookup failed:", e.message);
+      }
+
+      if (!ticketDoc) {
+        const docs = await ticketsCollection
+          .find({ _id: ticketIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 string _id lookup count:", docs.length);
+        ticketDoc = docs[0] || null;
+      }
+
+      if (!ticketDoc) {
+        console.log(
+          "❌ Ticket not found for id:",
+          JSON.stringify(ticketIdParam)
+        );
+        return res
+          .status(404)
+          .json({ success: false, message: "Ticket not found" });
+      }
+
+      // Perform update with updateOne and fetch updated doc
+      const filter = { _id: ticketDoc._id };
+      const update = { $set: { status, updatedAt: new Date() } };
+
+      const updateResult = await ticketsCollection.updateOne(filter, update);
+      console.log("🔁 ticket updateOne result:", updateResult);
+
+      if (updateResult.matchedCount === 0) {
+        console.log("❌ update matched 0 for ticket filter:", filter);
+        return res
+          .status(500)
+          .json({ success: false, message: "Failed to update ticket" });
+      }
+
+      const updatedDoc = await ticketsCollection.findOne(filter);
+
+      res.json({
+        success: true,
+        message: `Ticket ${status} successfully`,
+        data: updatedDoc,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+);
+
+// PUT toggle advertisement
+app.put(
+  "/api/admin/tickets/:id/advertise",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const { isAdvertised } = req.body;
+
+      // Normalize id param
+      let ticketIdParam = req.params.id;
+      if (typeof ticketIdParam === "object" && ticketIdParam !== null) {
+        ticketIdParam = ticketIdParam.$oid || ticketIdParam.toString();
+      }
+      if (typeof ticketIdParam === "string")
+        ticketIdParam = ticketIdParam.trim();
+      console.log(
+        "🔍 PUT /api/admin/tickets/:id/advertise - id param:",
+        JSON.stringify(ticketIdParam)
+      );
+
+      if (isAdvertised) {
+        // When counting, try to use ObjectId if possible, otherwise string comparison
+        let count = 0;
+        try {
+          count = await ticketsCollection.countDocuments({
+            isAdvertised: true,
+            _id: { $ne: new ObjectId(ticketIdParam) },
           });
+          console.log("🔎 advertise count (using ObjectId):", count);
+        } catch (e) {
+          count = await ticketsCollection.countDocuments({
+            isAdvertised: true,
+            _id: { $ne: ticketIdParam },
+          });
+          console.log("🔎 advertise count (using string _id):", count);
         }
 
-        if (booking.status !== "accepted") {
+        if (count >= 6) {
           return res.status(400).json({
             success: false,
-            message: "Booking must be accepted by vendor before payment",
+            message: "Maximum 6 tickets can be advertised at a time",
           });
         }
-
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ["card"],
-          line_items: [
-            {
-              price_data: {
-                currency: "bdt",
-                product_data: {
-                  name: booking.ticketTitle,
-                  description: `${booking.from} → ${booking.to}`,
-                },
-                unit_amount: Math.round(booking.totalPrice * 100),
-              },
-              quantity: 1,
-            },
-          ],
-          mode: "payment",
-          success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${process.env.CLIENT_URL}/dashboard/user/bookings`,
-          metadata: {
-            bookingId: bookingId,
-            userId: booking.userId,
-          },
-        });
-
-        res.json({
-          success: true,
-          sessionId: session.id,
-          url: session.url,
-        });
-      } catch (error) {
-        console.error("Stripe error:", error);
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
       }
-    });
 
-    // Verify payment and update booking
-    app.post("/api/payment/verify", verifyToken, async (req, res) => {
+      // Lookup ticket (ObjectId then string)
+      let ticketDoc = null;
       try {
-        const { sessionId } = req.body;
-
-        const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-        if (session.payment_status === "paid") {
-          const bookingId = session.metadata.bookingId;
-          const booking = await bookingCollection.findOne({
-            _id: new ObjectId(bookingId),
-          });
-
-          // Update booking
-          await bookingCollection.updateOne(
-            { _id: new ObjectId(bookingId) },
-            {
-              $set: {
-                status: "paid",
-                transactionId: session.payment_intent,
-                paymentDate: new Date(),
-                updatedAt: new Date(),
-              },
-            }
-          );
-
-          // Reduce ticket quantity
-          await ticketsCollection.updateOne(
-            { _id: new ObjectId(booking.ticketId) },
-            { $inc: { ticketQuantity: -booking.bookingQuantity } }
-          );
-
-          // Create transaction record
-          await transactionsCollection.insertOne({
-            transactionId: session.payment_intent,
-            userId: booking.userId,
-            bookingId: bookingId,
-            ticketTitle: booking.ticketTitle,
-            amount: booking.totalPrice,
-            paymentDate: new Date(),
-            paymentMethod: "card",
-            status: "completed",
-            createdAt: new Date(),
-          });
-
-          res.json({
-            success: true,
-            message: "Payment verified successfully",
-          });
-        } else {
-          res.status(400).json({
-            success: false,
-            message: "Payment not completed",
-          });
-        }
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
-      }
-    });
-
-    // GET user's transactions
-    app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
-      try {
-        const transactions = await transactionsCollection
-          .find({ userId: req.params.userId })
-          .sort({ paymentDate: -1 })
+        const docs = await ticketsCollection
+          .find({ _id: new ObjectId(ticketIdParam) })
+          .limit(1)
           .toArray();
-
-        res.json({ success: true, data: transactions });
-      } catch (error) {
-        res.status(500).json({
-          success: false,
-          message: error.message,
-        });
+        console.log("🔎 ObjectId lookup count (advertise):", docs.length);
+        ticketDoc = docs[0] || null;
+      } catch (e) {
+        console.log(
+          "⚠ Invalid ObjectId or lookup failed (advertise):",
+          e.message
+        );
       }
-    });
 
-    // ============================================
-    // ADMIN ROUTES (PROTECTED)
-    // ============================================
-
-    // GET all tickets
-    app.get(
-      "/api/admin/tickets",
-      verifyToken,
-      async (req, res) => {
-        try {
-          const tickets = await ticketsCollection
-            .find({})
-            .sort({ createdAt: -1 })
-            .toArray();
-
-          res.json({ success: true, data: tickets });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      if (!ticketDoc) {
+        const docs = await ticketsCollection
+          .find({ _id: ticketIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 string _id lookup count (advertise):", docs.length);
+        ticketDoc = docs[0] || null;
       }
-    );
 
-    // PUT approve/reject ticket
-    app.put(
-      "/api/admin/tickets/:id/status",
-      verifyToken,
-
-      async (req, res) => {
-        try {
-          const { status } = req.body;
-
-          const result = await ticketsCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.id) },
-            {
-              $set: {
-                status,
-                updatedAt: new Date(),
-              },
-            },
-            { returnDocument: "after" }
-          );
-
-          if (!result.value) {
-            return res.status(404).json({
-              success: false,
-              message: "Ticket not found",
-            });
-          }
-
-          res.json({
-            success: true,
-            message: `Ticket ${status} successfully`,
-            data: result.value,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      if (!ticketDoc) {
+        console.log(
+          "❌ Ticket not found for id (advertise):",
+          JSON.stringify(ticketIdParam)
+        );
+        return res
+          .status(404)
+          .json({ success: false, message: "Ticket not found" });
       }
-    );
 
-    // PUT toggle advertisement
-    app.put(
-      "/api/admin/tickets/:id/advertise",
-      verifyToken,
-   
-      async (req, res) => {
-        try {
-          const { isAdvertised } = req.body;
+      // Update
+      const filter = { _id: ticketDoc._id };
+      const update = { $set: { isAdvertised, updatedAt: new Date() } };
+      const updateResult = await ticketsCollection.updateOne(filter, update);
+      console.log("🔁 advertise updateOne result:", updateResult);
 
-          if (isAdvertised) {
-            const count = await ticketsCollection.countDocuments({
-              isAdvertised: true,
-              _id: { $ne: new ObjectId(req.params.id) },
-            });
-
-            if (count >= 6) {
-              return res.status(400).json({
-                success: false,
-                message: "Maximum 6 tickets can be advertised at a time",
-              });
-            }
-          }
-
-          const result = await ticketsCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.id) },
-            {
-              $set: {
-                isAdvertised,
-                updatedAt: new Date(),
-              },
-            },
-            { returnDocument: "after" }
-          );
-
-          if (!result.value) {
-            return res.status(404).json({
-              success: false,
-              message: "Ticket not found",
-            });
-          }
-
-          res.json({
-            success: true,
-            message: isAdvertised
-              ? "Ticket advertised"
-              : "Advertisement removed",
-            data: result.value,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      if (updateResult.matchedCount === 0) {
+        console.log("❌ advertise update matched 0 for filter:", filter);
+        return res
+          .status(500)
+          .json({ success: false, message: "Failed to update advertisement" });
       }
-    );
 
-    // GET all users
-    app.get(
-      "/api/admin/users",
-      verifyToken,
-      
-      async (req, res) => {
-        try {
-          const users = await usersCollection
-            .find({})
-            .project({ password: 0 })
-            .toArray();
+      const updatedDoc = await ticketsCollection.findOne(filter);
 
-          res.json({ success: true, data: users });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      res.json({
+        success: true,
+        message: isAdvertised ? "Ticket advertised" : "Advertisement removed",
+        data: updatedDoc,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+);
+
+// GET all users
+app.get(
+  "/api/admin/users",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const users = await usersCollection
+        .find({})
+        .project({ password: 0 })
+        .toArray();
+
+      res.json({ success: true, data: users });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+);
+
+// PUT update user role
+app.put(
+  "/api/admin/users/:id/role",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const { role } = req.body;
+
+      // Normalize id parameter in case it's sent as an object (e.g., { $oid: '...' })
+      let userIdParam = req.params.id;
+      if (typeof userIdParam === "object" && userIdParam !== null) {
+        userIdParam = userIdParam.$oid || userIdParam.toString();
       }
-    );
+      // Trim to remove accidental whitespace
+      if (typeof userIdParam === "string") userIdParam = userIdParam.trim();
 
-    // PUT update user role
-    app.put(
-      "/api/admin/users/:id/role",
-      verifyToken,
-      
-      async (req, res) => {
-        try {
-          const { role } = req.body;
+      console.log(
+        "🔍 PUT /api/admin/users/:id/role - id param:",
+        JSON.stringify(userIdParam),
+        "type:",
+        typeof userIdParam
+      );
 
-          const result = await usersCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.id) },
-            { $set: { role, updatedAt: new Date() } },
-            { returnDocument: "after" }
-          );
-
-          if (!result.value) {
-            return res.status(404).json({
-              success: false,
-              message: "User not found",
-            });
-          }
-
-          res.json({
-            success: true,
-            message: `User role updated to ${role}`,
-            data: result.value,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      // Try multiple lookup strategies for robustness
+      let userToUpdate = null;
+      try {
+        const docs = await usersCollection
+          .find({ _id: new ObjectId(userIdParam) })
+          .limit(1)
+          .toArray();
+        console.log("🔎 ObjectId lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      } catch (e) {
+        console.log("⚠ Invalid ObjectId or lookup failed:", e.message);
       }
-    );
 
-    // PUT mark vendor as fraud
-    app.put(
-      "/api/admin/users/:id/fraud",
-      verifyToken,
-   
-      async (req, res) => {
-        try {
-          const { isFraud } = req.body;
-
-          const result = await usersCollection.findOneAndUpdate(
-            { _id: new ObjectId(req.params.id) },
-            { $set: { isFraud, updatedAt: new Date() } },
-            { returnDocument: "after" }
-          );
-
-          if (!result.value) {
-            return res.status(404).json({
-              success: false,
-              message: "User not found",
-            });
-          }
-
-          if (isFraud) {
-            await ticketsCollection.updateMany(
-              { vendorId: req.params.id },
-              { $set: { status: "rejected" } }
-            );
-          }
-
-          res.json({
-            success: true,
-            message: isFraud
-              ? "Vendor marked as fraud"
-              : "Fraud status removed",
-            data: result.value,
-          });
-        } catch (error) {
-          res.status(500).json({
-            success: false,
-            message: error.message,
-          });
-        }
+      if (!userToUpdate) {
+        const docs = await usersCollection
+          .find({ _id: userIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 string _id lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
       }
-    );
+
+      if (!userToUpdate) {
+        const docs = await usersCollection
+          .find({ email: userIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 email lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      }
+
+      if (!userToUpdate) {
+        const docs = await usersCollection
+          .find({ uid: userIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 uid lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      }
+
+      if (!userToUpdate) {
+        console.log(
+          "❌ User not found for id/email/uid:",
+          JSON.stringify(userIdParam)
+        );
+        return res
+          .status(404)
+          .json({ success: false, message: "User not found" });
+      }
+
+      console.log("🔔 Matched user:", {
+        _id: userToUpdate._id?.toString?.(),
+        email: userToUpdate.email,
+        uid: userToUpdate.uid,
+      });
+
+      // Use the found user's _id in the update (preserves stored type)
+      const filter = { _id: userToUpdate._id };
+      const update = { $set: { role, updatedAt: new Date() } };
+
+      const updateResult = await usersCollection.updateOne(filter, update);
+      console.log("🔁 updateOne result:", updateResult);
+
+      if (updateResult.matchedCount === 0) {
+        console.log(
+          "❌ updateOne matched 0 documents for filter:",
+          filter,
+          "_id type:",
+          userToUpdate._id?.constructor?.name
+        );
+        return res
+          .status(500)
+          .json({ success: false, message: "Failed to update user role" });
+      }
+
+      const updatedDoc = await usersCollection.findOne(filter);
+      console.log("🔔 Updated doc:", {
+        _id: updatedDoc?._id?.toString?.(),
+        role: updatedDoc?.role,
+      });
+
+      res.json({
+        success: true,
+        message: `User role updated to ${role}`,
+        data: updatedDoc,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+);
+
+// PUT mark vendor as fraud
+app.put(
+  "/api/admin/users/:id/fraud",
+  verifyToken,
+
+  async (req, res) => {
+    try {
+      const { isFraud } = req.body;
+
+      // Normalize id parameter in case it's sent as an object (e.g., { $oid: '...' })
+      let userIdParam = req.params.id;
+      if (typeof userIdParam === "object" && userIdParam !== null) {
+        userIdParam = userIdParam.$oid || userIdParam.toString();
+      }
+      if (typeof userIdParam === "string") userIdParam = userIdParam.trim();
+
+      console.log(
+        "🔍 PUT /api/admin/users/:id/fraud - id param:",
+        JSON.stringify(userIdParam),
+        "type:",
+        typeof userIdParam
+      );
+
+      // Try multiple lookup strategies for robustness
+      let userToUpdate = null;
+      try {
+        const docs = await usersCollection
+          .find({ _id: new ObjectId(userIdParam) })
+          .limit(1)
+          .toArray();
+        console.log("🔎 ObjectId lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      } catch (e) {
+        console.log("⚠ Invalid ObjectId or lookup failed:", e.message);
+      }
+
+      if (!userToUpdate) {
+        const docs = await usersCollection
+          .find({ _id: userIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 string _id lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      }
+
+      if (!userToUpdate) {
+        const docs = await usersCollection
+          .find({ email: userIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 email lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      }
+
+      if (!userToUpdate) {
+        const docs = await usersCollection
+          .find({ uid: userIdParam })
+          .limit(1)
+          .toArray();
+        console.log("🔎 uid lookup result count:", docs.length);
+        userToUpdate = docs[0] || null;
+      }
+
+      if (!userToUpdate) {
+        console.log(
+          "❌ User not found for id/email/uid:",
+          JSON.stringify(userIdParam)
+        );
+        return res
+          .status(404)
+          .json({ success: false, message: "User not found" });
+      }
+
+      console.log("🔔 Matched user:", {
+        _id: userToUpdate._id?.toString?.(),
+        email: userToUpdate.email,
+        uid: userToUpdate.uid,
+      });
+
+      // Use the found user's _id in the update (preserves stored type)
+      const filter = { _id: userToUpdate._id };
+      const update = { $set: { isFraud, updatedAt: new Date() } };
+
+      const updateResult = await usersCollection.updateOne(filter, update);
+      console.log("🔁 updateOne result:", updateResult);
+
+      if (updateResult.matchedCount === 0) {
+        console.log(
+          "❌ updateOne matched 0 documents for filter:",
+          filter,
+          "_id type:",
+          userToUpdate._id?.constructor?.name
+        );
+        return res
+          .status(500)
+          .json({ success: false, message: "Failed to update fraud status" });
+      }
+
+      const updatedDoc = await usersCollection.findOne(filter);
+
+      if (isFraud) {
+        // vendorId in tickets may be stored as string; ensure we update using string representation
+        const vendorIdForTickets = userToUpdate._id?.toString
+          ? userToUpdate._id.toString()
+          : userToUpdate._id;
+        const ticketUpdateResult = await ticketsCollection.updateMany(
+          { vendorId: vendorIdForTickets },
+          { $set: { status: "rejected" } }
+        );
+        console.log(
+          "🔔 Updated tickets vendorId:",
+          vendorIdForTickets,
+          "ticketUpdateResult:",
+          ticketUpdateResult
+        );
+      }
+
+      console.log(
+        "✅ Fraud status updated for:",
+        userToUpdate._id,
+        "=>",
+        isFraud
+      );
+      res.json({
+        success: true,
+        message: isFraud ? "Vendor marked as fraud" : "Fraud status removed",
+        data: updatedDoc,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+);
 // ============================================
 // ERROR HANDLING
 // ============================================
