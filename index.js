@@ -15,14 +15,19 @@ const PORT = process.env.PORT || 5000;
 
 const admin = require("firebase-admin");
 const serviceAccountKey = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-const serviceAccount = require(serviceAccountKey);
+let serviceAccount;
 
-admin.initializeApp(
-  {
-    credential: admin.credential.cert(serviceAccount),
-  },
-  console.log("✅ Firebase Admin Initialized")
-);
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  // Production: Load from environment variable (Render)
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+} else {
+  // Local development fallback: Load from file (safe locally)
+  serviceAccount = require("./serviceAccountKey.json");
+}
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 // JWT VERIFICATION MIDDLEWARE
 const verifyToken = async (req, res, next) => {
