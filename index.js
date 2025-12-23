@@ -1041,6 +1041,7 @@ app.delete("/api/role-requests/:requestId", verifyToken, async (req, res) => {
 // POST create booking
 // FIXED: POST create booking - Update this in your index.js
 // POST a new booking 
+// POST a new booking - FULLY FIXED & ROBUST
 app.post("/api/bookings", verifyToken, async (req, res) => {
   try {
     const { ticketId, bookingQuantity = 1, ...otherData } = req.body;
@@ -1052,9 +1053,11 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
         message: "ticketId is required",
       });
     }
+
+    // Fetch ticket with approved status
     const ticket = await ticketsCollection.findOne({
       _id: new ObjectId(ticketId),
-      status: "approved", // Optional: only allow booking accepted tickets
+      status: "approved", // Change to "accepted" if you prefer that spelling
     });
 
     if (!ticket) {
@@ -1063,22 +1066,36 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
         message: "Ticket not found or not available for booking.",
       });
     }
+
+    // Safely convert price and quantity to numbers
     const ticketPrice = Number(ticket.price);
+    const currentQuantity = Number(ticket.ticketQuantity) || 0;
+    const requestedQuantity = Number(bookingQuantity);
+
     if (isNaN(ticketPrice) || ticketPrice < 0) {
       return res.status(400).json({
         success: false,
         message: "Invalid ticket price",
       });
     }
-    const availableQuantity = ticket.ticketQuantity || 0;
-    if (availableQuantity < bookingQuantity) {
+
+    if (isNaN(currentQuantity) || currentQuantity < 0) {
       return res.status(400).json({
         success: false,
-        message: `Only ${availableQuantity} ticket(s) available. Cannot book ${bookingQuantity}.`,
+        message: "Invalid available ticket quantity on the ticket",
       });
     }
-    const totalPrice = ticketPrice * bookingQuantity;
 
+    if (currentQuantity < requestedQuantity) {
+      return res.status(400).json({
+        success: false,
+        message: `Only ${currentQuantity} ticket(s) available. Cannot book ${requestedQuantity}.`,
+      });
+    }
+
+    const totalPrice = ticketPrice * requestedQuantity;
+
+    // Build the new booking with guaranteed number types
     const newBooking = {
       ...otherData,
 
@@ -1088,24 +1105,43 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
       from: ticket.from,
       to: ticket.to,
       transportType: ticket.transportType,
-      price: ticketPrice,              // Price per ticket (number)
-      bookingQuantity: Number(bookingQuantity),
-      totalPrice: totalPrice,          // ← This fixes the crash in MyBookedTickets
+
+      // Pricing & Quantity - Safe numbers
+      price: ticketPrice,
+      bookingQuantity: requestedQuantity,
+      totalPrice: totalPrice,
+
+      // Vendor info
       vendorId: ticket.vendorId,
       vendorEmail: ticket.vendorEmail,
       vendorName: ticket.vendorName || "Unknown Vendor",
+
+      // Buyer info
       userEmail: buyerEmail,
+
+      // Travel details
       departureDate: ticket.departureDate,
       departureTime: ticket.departureTime,
+
+      // Status & timestamps
       status: "pending",
       createdAt: new Date(),
       updatedAt: new Date(),
     };
+
+    // Insert the booking first
     const result = await bookingCollection.insertOne(newBooking);
+
+    // Now safely decrement ticket quantity (using converted number)
     await ticketsCollection.updateOne(
       { _id: ticket._id },
-      { $inc: { ticketQuantity: -bookingQuantity } }
+      { 
+        $inc: { ticketQuantity: -requestedQuantity },
+        $set: { updatedAt: new Date() } // Optional: update timestamp
+      }
     );
+
+    // Success response
     res.json({
       success: true,
       message: "Booking request sent successfully!",
@@ -1120,11 +1156,10 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to create booking",
-      error: error.message,
+      error: error.message || "Unknown server error",
     });
   }
 });
-
 // FIXED: GET user's bookings - Update this in your index.js
 app.get("/api/bookings/user", verifyToken, async (req, res) => {
   try {
