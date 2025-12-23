@@ -1040,61 +1040,87 @@ app.delete("/api/role-requests/:requestId", verifyToken, async (req, res) => {
 
 // POST create booking
 // FIXED: POST create booking - Update this in your index.js
-// POST a new booking
+// POST a new booking 
 app.post("/api/bookings", verifyToken, async (req, res) => {
   try {
-    const { ticketId, price, ...otherData } = req.body;
-    const buyerEmail = req.tokenEmail; // Automatically extracted from JWT by verifyToken
+    const { ticketId, bookingQuantity = 1, ...otherData } = req.body;
+    const buyerEmail = req.tokenEmail; // From Firebase JWT
 
-    // 1. Fetch the ticket to get the vendor's information
-    // This is the "bridge" that connects the buyer to the vendor
+    if (!ticketId) {
+      return res.status(400).json({
+        success: false,
+        message: "ticketId is required",
+      });
+    }
     const ticket = await ticketsCollection.findOne({
       _id: new ObjectId(ticketId),
+      status: "accepted", // Optional: only allow booking accepted tickets
     });
 
     if (!ticket) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Ticket not found. It may have been deleted by the vendor." 
+      return res.status(404).json({
+        success: false,
+        message: "Ticket not found or not available for booking.",
       });
     }
+    const ticketPrice = Number(ticket.price);
+    if (isNaN(ticketPrice) || ticketPrice < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ticket price",
+      });
+    }
+    const availableQuantity = ticket.ticketQuantity || 0;
+    if (availableQuantity < bookingQuantity) {
+      return res.status(400).json({
+        success: false,
+        message: `Only ${availableQuantity} ticket(s) available. Cannot book ${bookingQuantity}.`,
+      });
+    }
+    const totalPrice = ticketPrice * bookingQuantity;
 
-    // 2. Build the complete booking object
     const newBooking = {
       ...otherData,
-      ticketId: ticketId,
+
+      // Core booking info
+      ticketId: ticket._id.toString(),
       ticketTitle: ticket.title,
-      price: price,
-      
-      // VENDOR DATA: Required for "BookingRequest" tab
+      from: ticket.from,
+      to: ticket.to,
+      transportType: ticket.transportType,
+      price: ticketPrice,              // Price per ticket (number)
+      bookingQuantity: Number(bookingQuantity),
+      totalPrice: totalPrice,          // ← This fixes the crash in MyBookedTickets
       vendorId: ticket.vendorId,
       vendorEmail: ticket.vendorEmail,
-      
-      // USER DATA: Required for "My Booked Tickets" tab
-      userEmail: buyerEmail, 
-      
-      // INITIAL STATE
+      vendorName: ticket.vendorName || "Unknown Vendor",
+      userEmail: buyerEmail,
+      departureDate: ticket.departureDate,
+      departureTime: ticket.departureTime,
       status: "pending",
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
-
-    // 3. Save to database
     const result = await bookingCollection.insertOne(newBooking);
-
-    // 4. Return success
-    res.json({ 
-      success: true, 
+    await ticketsCollection.updateOne(
+      { _id: ticket._id },
+      { $inc: { ticketQuantity: -bookingQuantity } }
+    );
+    res.json({
+      success: true,
       message: "Booking request sent successfully!",
-      insertedId: result.insertedId 
+      bookingId: result.insertedId,
+      data: {
+        _id: result.insertedId,
+        ...newBooking,
+      },
     });
-
   } catch (error) {
     console.error("❌ Error creating booking:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Internal server error while creating booking",
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: "Failed to create booking",
+      error: error.message,
     });
   }
 });
