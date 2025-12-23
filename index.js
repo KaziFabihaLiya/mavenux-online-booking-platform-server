@@ -201,7 +201,7 @@ app.get("/api/debug/me", verifyToken, async (req, res) => {
   }
 });
 
-// ✅ FIX 2: User registration/login route (ENSURE ROLE IS SAVED)
+// FIX 2: User registration/login route (ENSURE ROLE IS SAVED)
 app.post("/api/user", async (req, res) => {
   try {
     const userData = req.body;
@@ -288,75 +288,6 @@ app.post("/api/user", async (req, res) => {
     });
   }
 });
-
-// Password validation endpoint - validates the password rules (length, uppercase, lowercase)
-app.post("/api/validate-password", async (req, res) => {
-  try {
-    const { password } = req.body || {};
-    if (!password || typeof password !== "string") {
-      return res
-        .status(400)
-        .json({ success: false, message: "Password is required" });
-    }
-
-    const errors = [];
-    if (password.length < 6)
-      errors.push("Password must be at least 6 characters long.");
-    if (!/[A-Z]/.test(password))
-      errors.push("Password must contain at least one uppercase letter.");
-    if (!/[a-z]/.test(password))
-      errors.push("Password must contain at least one lowercase letter.");
-
-    if (errors.length > 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: errors.join(" ") });
-    }
-
-    return res.json({ success: true, message: "Password is valid" });
-  } catch (err) {
-    console.error("/validate-password error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error validating password" });
-  }
-});
-
-// app.post("/user", async (req, res) => {
-//   try {
-//     const userData = req.body;
-
-//     const query = { email: userData.email };
-//     const update = {
-//       $set: {
-//         email: userData.email,
-//         displayName: userData.displayName,
-//         photoURL: userData.photoURL,
-//         uid: userData.uid, // Firebase UID
-//         role: userData.role || "user",
-//         last_loggedIn: new Date().toISOString(),
-//       },
-//       $setOnInsert: {
-//         created_at: new Date().toISOString(),
-//       },
-//     };
-
-//     const result = await usersCollection.updateOne(query, update, {
-//       upsert: true,
-//     });
-
-//     // Return the user document
-//     const user = await usersCollection.findOne(query);
-
-//     res.send({
-//       message: result.matchedCount > 0 ? "User updated" : "User created",
-//       user,
-//     });
-//   } catch (err) {
-//     console.error("Error in /user:", err);
-//     res.status(500).send({ error: "Server error during user save/update" });
-//   }
-// });
 
 // get a user's role
 app.get("/api/user/role", verifyToken, async (req, res) => {
