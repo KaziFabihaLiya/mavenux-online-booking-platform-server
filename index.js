@@ -1268,10 +1268,10 @@ app.post("/api/payment/create-session", verifyToken, async (req, res) => {
       });
     }
 
-    if (booking.status !== "accepted") {
+    if (booking.status !== "approved") {
       return res.status(400).json({
         success: false,
-        message: "Booking must be accepted by vendor before payment",
+        message: "Booking must be approved by vendor before payment",
       });
     }
 
