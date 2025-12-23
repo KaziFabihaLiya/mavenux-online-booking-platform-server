@@ -1288,86 +1288,6 @@ app.put("/api/bookings/:id/status", verifyToken, async (req, res) => {
 //  
 
 // Create Stripe checkout session
-app.post("/api/payment/create-session", verifyToken, async (req, res) => {
-  try {
-    const { bookingId } = req.body;
-
-    const booking = await bookingCollection.findOne({
-      _id: new ObjectId(bookingId),
-    });
-
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: "Booking not found",
-      });
-    }
-
-    if (booking.status !== "approved") {
-      return res.status(400).json({
-        success: false,
-        message: "Booking must be approved by vendor before payment",
-      });
-    }
-
-    // Prevent creating payment session if departure has already passed
-    const departureDateTime = new Date(
-      booking.departureDate + " " + booking.departureTime
-    );
-    if (isNaN(departureDateTime.getTime()) || departureDateTime <= new Date()) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Cannot pay for a booking whose departure date/time has already passed",
-      });
-    }
-
-    // Prevent duplicate payments
-    if (booking.status === "paid") {
-      return res.status(400).json({
-        success: false,
-        message: "Booking is already paid",
-      });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "bdt",
-            product_data: {
-              name: booking.ticketTitle,
-              description: `${booking.from} → ${booking.to}`,
-            },
-            unit_amount: Math.round(booking.totalPrice * 100),
-          },
-          quantity: 1,
-        },
-      ],
-      mode: "payment",
-      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.CLIENT_URL}/dashboard/user/bookings`,
-      metadata: {
-        bookingId: bookingId,
-        userId: booking.userId,
-      },
-    });
-
-    res.json({
-      success: true,
-      sessionId: session.id,
-      url: session.url,
-    });
-  } catch (error) {
-    console.error("Stripe error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
-});
-
 // Verify payment and update booking
 app.post("/api/payment/verify", verifyToken, async (req, res) => {
   try {
@@ -1481,7 +1401,71 @@ app.post("/api/payment/verify", verifyToken, async (req, res) => {
     });
   }
 });
+// CREATE STRIPE CHECKOUT SESSION
+app.post("/api/payment/create-session", verifyToken, async (req, res) => {
+  try {
+    const { bookingId } = req.body;
 
+    if (!bookingId) {
+      return res.status(400).json({ success: false, message: "bookingId is required" });
+    }
+
+    // Fetch booking and validate ownership + status
+    const booking = await bookingCollection.findOne({
+      _id: new ObjectId(bookingId),
+      userEmail: req.tokenEmail, // Security: user can only pay for their own booking
+      status: "accepted",        // Only pay if vendor approved
+    });
+
+    if (!booking) {
+      return res.status(400).json({
+        success: false,
+        message: "Booking not found or not approved for payment yet",
+      });
+    }
+
+    if (booking.status === "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "This booking is already paid",
+      });
+    }
+
+    // Create Stripe Checkout Session
+    const session = await stripeClient.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "bdt",
+            product_data: {
+              name: booking.ticketTitle,
+              description: `${booking.from} → ${booking.to} | ${booking.departureDate} at ${booking.departureTime} | ${booking.bookingQuantity} ticket(s)`,
+            },
+            unit_amount: Math.round(booking.totalPrice * 100), // BDT in paisa
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+      metadata: {
+        bookingId: booking._id.toString(),
+        userEmail: req.tokenEmail,
+      },
+    });
+
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error("❌ Stripe session creation error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create payment session",
+      error: error.message,
+    });
+  }
+});
 // GET user's transactions
 app.get("/api/transactions/user/:userId", verifyToken, async (req, res) => {
   try {
