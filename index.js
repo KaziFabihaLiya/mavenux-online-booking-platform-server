@@ -1054,7 +1054,7 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
     }
     const ticket = await ticketsCollection.findOne({
       _id: new ObjectId(ticketId),
-      status: "accepted", // Optional: only allow booking accepted tickets
+      status: "approved", // Optional: only allow booking accepted tickets
     });
 
     if (!ticket) {
